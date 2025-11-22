@@ -1818,7 +1818,7 @@ impl CodeGenerator {
 
         // Add size comment
         if let Some(size) = compound.byte_size {
-            closing.push_str(&format!(" - sizeof: {}", size));
+            closing.push_str(&format!(" // sizeof: {}", size));
         }
 
         self.write_line(&closing);
@@ -1855,7 +1855,7 @@ impl CodeGenerator {
 
             // Add size comment
             if let Some(size) = compound.byte_size {
-                line.push_str(&format!(" - sizeof: {}", size));
+                line.push_str(&format!(" // sizeof: {}", size));
             }
 
             self.write_line(&line);
@@ -1936,7 +1936,7 @@ impl CodeGenerator {
 
             // Add size comment
             if let Some(size) = compound.byte_size {
-                closing.push_str(&format!(" - sizeof: {}", size));
+                closing.push_str(&format!(" // sizeof: {}", size));
             }
 
             self.write_line(&closing);
