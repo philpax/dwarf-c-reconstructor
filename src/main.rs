@@ -153,6 +153,10 @@ struct Function {
     class_name: Option<String>,
     accessibility: Option<String>,
     has_body: bool,
+    low_pc: Option<u64>,
+    high_pc: Option<u64>,
+    is_inline: bool,
+    is_external: bool,
 }
 
 #[derive(Debug)]
@@ -547,8 +551,12 @@ impl DwarfParser {
         let return_type = self.resolve_type(unit, entry)?;
         let accessibility = self.get_accessibility(entry);
         let has_body = !is_declaration;
+        let low_pc = self.get_u64_attr(entry, gimli::DW_AT_low_pc);
+        let high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
+        let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
+        let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, &mut entries)
+        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, &mut entries)
     }
 
     fn parse_lexical_block_offset(
@@ -793,8 +801,12 @@ impl DwarfParser {
         let return_type = self.resolve_type(unit, entry)?;
         let accessibility = self.get_accessibility(entry);
         let has_body = !is_declaration;
+        let low_pc = self.get_u64_attr(entry, gimli::DW_AT_low_pc);
+        let high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
+        let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
+        let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, entries)
+        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, entries)
     }
 
     fn parse_function_children(
@@ -806,6 +818,10 @@ impl DwarfParser {
         accessibility: Option<String>,
         has_body: bool,
         is_method: bool,
+        low_pc: Option<u64>,
+        high_pc: Option<u64>,
+        is_inline: bool,
+        is_external: bool,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
         let mut parameters = Vec::new();
@@ -876,6 +892,10 @@ impl DwarfParser {
             class_name: None,
             accessibility,
             has_body,
+            low_pc,
+            high_pc,
+            is_inline,
+            is_external,
         }))
     }
 
@@ -1351,6 +1371,43 @@ impl CodeGenerator {
         self.output.push('\n');
     }
 
+    fn estimate_type_size(&self, type_info: &TypeInfo) -> u64 {
+        // Determine the base element size
+        let base_size = if type_info.pointer_count > 0 || type_info.is_function_pointer {
+            // Pointers are 4 bytes (32-bit architecture based on sample output)
+            4
+        } else {
+            // Calculate size based on base type
+            match type_info.base_type.as_str() {
+                "char" | "unsigned char" | "signed char" | "bool" => 1,
+                "short" | "short int" | "unsigned short" | "signed short" => 2,
+                "int" | "unsigned int" | "signed int" => 4,
+                "long" | "unsigned long" | "signed long" => 4, // 32-bit long
+                "long long" | "unsigned long long" | "signed long long" => 8,
+                "float" => 4,
+                "double" => 8,
+                "long double" => 12, // x86 extended precision
+                "void" => 0,
+                // For GLuint, GLint and similar types (typically typedef to unsigned int / int)
+                s if s.starts_with("GL") => 4,
+                // For fpos_t and other common types
+                "fpos_t" => 4,
+                // For struct/class types, we can't easily determine size here
+                // This is a limitation - ideally we'd look up the byte_size from parsed types
+                _ => 4, // Conservative default guess
+            }
+        };
+
+        // If there are arrays, multiply by total array size
+        // This handles both arrays of base types and arrays of pointers
+        if !type_info.array_sizes.is_empty() {
+            let total_elements: usize = type_info.array_sizes.iter().product();
+            return base_size * (total_elements as u64);
+        }
+
+        base_size
+    }
+
     fn generate_compile_unit(&mut self, cu: &CompileUnit) {
         self.write_line_comment("", &cu.name);
         if let Some(ref producer) = cu.producer {
@@ -1621,43 +1678,74 @@ impl CodeGenerator {
     }
 
     fn generate_members(&mut self, members: &[&Variable]) {
-        // Group by line number and type compatibility
-        let mut lines: HashMap<u64, Vec<&Variable>> = HashMap::new();
-        let mut no_line_vars = Vec::new();
+        // Check if we have offset information for members - if so, use offset-based ordering
+        let has_any_offsets = members.iter().any(|m| m.offset.is_some());
 
-        for member in members {
-            if let Some(line) = member.line {
-                lines.entry(line).or_insert_with(Vec::new).push(member);
-            } else {
-                no_line_vars.push(member);
-            }
-        }
+        if has_any_offsets {
+            // Use offset-based ordering with padding detection
+            let mut vars_with_offsets: Vec<_> = members.iter()
+                .filter_map(|v| v.offset.map(|o| (o, *v)))
+                .collect();
+            vars_with_offsets.sort_by_key(|(offset, _)| *offset);
 
-        // Generate grouped members
-        let mut sorted_lines: Vec<_> = lines.iter().collect();
-        sorted_lines.sort_by_key(|(line, _)| *line);
+            let mut prev_end_offset = None;
 
-        for (line, vars) in sorted_lines {
-            // Check if any variable has offset information
-            let has_offsets = vars.iter().any(|v| v.offset.is_some());
-
-            if has_offsets {
-                // Output members individually with offset information
-                for var in vars {
-                    let mut decl = var.type_info.to_string(&var.name);
-                    decl.push_str(";");
-
-                    // Add line comment
-                    decl.push_str(&format!(" //{}", line));
-
-                    // Add offset if available
-                    if let Some(offset) = var.offset {
-                        decl.push_str(&format!(" @ offset {}", offset));
+            // Output members individually with offset information and padding
+            for (offset, var) in vars_with_offsets {
+                // Detect padding between members
+                if let Some(prev_end) = prev_end_offset {
+                    if offset > prev_end {
+                        let padding_bytes = offset - prev_end;
+                        self.write_line(&format!("// [{} byte{} padding for alignment]",
+                            padding_bytes,
+                            if padding_bytes == 1 { "" } else { "s" }
+                        ));
                     }
-
-                    self.write_line(&decl);
                 }
-            } else {
+
+                let mut decl = var.type_info.to_string(&var.name);
+                decl.push_str(";");
+
+                // Add line and offset comments
+                if let Some(line) = var.line {
+                    decl.push_str(&format!(" //{}", line));
+                }
+                decl.push_str(&format!(" @ offset {}", offset));
+
+                self.write_line(&decl);
+
+                // Calculate end offset for next iteration
+                let member_size = self.estimate_type_size(&var.type_info);
+                prev_end_offset = Some(offset + member_size);
+            }
+
+            // Output members without offsets at the end
+            for var in members.iter().filter(|v| v.offset.is_none()) {
+                let decl = var.type_info.to_string(&var.name);
+                if let Some(line) = var.line {
+                    self.write_line_comment(&format!("{};", decl), &line.to_string());
+                } else {
+                    self.write_line(&format!("{};", decl));
+                }
+            }
+        } else {
+            // No offset information - use original line-based grouping
+            let mut lines: HashMap<u64, Vec<&Variable>> = HashMap::new();
+            let mut no_line_vars = Vec::new();
+
+            for member in members {
+                if let Some(line) = member.line {
+                    lines.entry(line).or_insert_with(Vec::new).push(member);
+                } else {
+                    no_line_vars.push(member);
+                }
+            }
+
+            // Generate grouped members
+            let mut sorted_lines: Vec<_> = lines.iter().collect();
+            sorted_lines.sort_by_key(|(line, _)| *line);
+
+            for (line, vars) in sorted_lines {
                 // Group by type compatibility
                 let mut type_groups: Vec<Vec<&Variable>> = Vec::new();
 
@@ -1710,11 +1798,11 @@ impl CodeGenerator {
                 let full_decl = decls.join("; ");
                 self.write_line_comment(&format!("{};", full_decl), &line.to_string());
             }
-        }
 
-        // Variables without line numbers
-        for var in no_line_vars {
-            self.write_line(&format!("{};", var.type_info.to_string(&var.name)));
+            // Variables without line numbers
+            for var in no_line_vars {
+                self.write_line(&format!("{};", var.type_info.to_string(&var.name)));
+            }
         }
     }
 
@@ -1783,8 +1871,18 @@ impl CodeGenerator {
         if !func.has_body || (func.variables.is_empty() && func.lexical_blocks.is_empty() &&
                                func.inlined_calls.is_empty() && func.labels.is_empty()) {
             // Function declaration only - put semicolon on same line
-            self.write_line(&format!("{}; {}", decl,
-                func.line.map(|l| format!("//{}", l)).unwrap_or_default()));
+            let mut comment = String::new();
+            if let Some(line) = func.line {
+                comment.push_str(&format!("//{}", line));
+            }
+            if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+                let size = high.saturating_sub(low);
+                if !comment.is_empty() {
+                    comment.push(' ');
+                }
+                comment.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
+            }
+            self.write_line(&format!("{}; {}", decl, comment));
         } else {
             self.write_line(&decl);
 
@@ -1810,6 +1908,19 @@ impl CodeGenerator {
 
     fn generate_function_declaration(&self, func: &Function) -> String {
         let mut decl = String::new();
+
+        // Static/extern specifier (only for non-method functions)
+        if !func.is_method {
+            if !func.is_external {
+                decl.push_str("static ");
+            }
+            // Note: "extern" is implicit for external functions, so we don't output it
+        }
+
+        // Inline specifier
+        if func.is_inline {
+            decl.push_str("inline ");
+        }
 
         // Return type
         decl.push_str(&func.return_type.base_type);
@@ -2031,6 +2142,183 @@ impl CodeGenerator {
     }
 }
 
+fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut type_info = Vec::new();
+
+    // Collect all types with size information
+    for cu in compile_units {
+        for element in &cu.elements {
+            if let Element::Compound(compound) = element {
+                if let Some(size) = compound.byte_size {
+                    let name = if let Some(ref n) = compound.typedef_name {
+                        n.clone()
+                    } else if let Some(ref n) = compound.name {
+                        format!("{} {}", compound.compound_type, n)
+                    } else {
+                        format!("anonymous {}", compound.compound_type)
+                    };
+
+                    // Calculate total padding if members have offsets
+                    let mut total_padding = 0u64;
+                    if !compound.members.is_empty() {
+                        let members_with_offsets: Vec<_> = compound.members.iter()
+                            .filter_map(|m| m.offset.map(|o| (o, m)))
+                            .collect();
+
+                        if !members_with_offsets.is_empty() {
+                            // Calculate padding between members
+                            let mut sorted_members = members_with_offsets.clone();
+                            sorted_members.sort_by_key(|(offset, _)| *offset);
+
+                            let mut prev_end = None;
+                            for (offset, member) in sorted_members {
+                                if let Some(prev) = prev_end {
+                                    if offset > prev {
+                                        total_padding += offset - prev;
+                                    }
+                                }
+
+                                // Estimate member size
+                                let member_size = estimate_member_size(&member.type_info);
+                                prev_end = Some(offset + member_size);
+                            }
+
+                            // Check for padding at the end
+                            if let Some(last_end) = prev_end {
+                                if size > last_end {
+                                    total_padding += size - last_end;
+                                }
+                            }
+                        }
+                    }
+
+                    type_info.push((name, size, total_padding, compound.compound_type.clone()));
+                }
+            }
+        }
+    }
+
+    // Sort by size (largest first)
+    type_info.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Generate report
+    let mut report = String::new();
+    report.push_str("# Type Size Analysis Report\n\n");
+
+    // Summary statistics
+    let total_types = type_info.len();
+    let total_size: u64 = type_info.iter().map(|(_, s, _, _)| s).sum();
+    let total_padding: u64 = type_info.iter().map(|(_, _, p, _)| p).sum();
+    let types_with_padding = type_info.iter().filter(|(_, _, p, _)| *p > 0).count();
+
+    report.push_str(&format!("## Summary\n\n"));
+    report.push_str(&format!("- Total types analyzed: {}\n", total_types));
+    report.push_str(&format!("- Total size of all types: {} bytes\n", total_size));
+    report.push_str(&format!("- Total padding across all types: {} bytes\n", total_padding));
+    report.push_str(&format!("- Types with padding: {}\n", types_with_padding));
+    if total_size > 0 {
+        let padding_percent = (total_padding as f64 / total_size as f64) * 100.0;
+        report.push_str(&format!("- Padding overhead: {:.2}%\n", padding_percent));
+    }
+    report.push_str("\n");
+
+    // Top 20 largest types
+    report.push_str("## Top 20 Largest Types\n\n");
+    report.push_str("| Type | Size (bytes) | Padding (bytes) | Padding % |\n");
+    report.push_str("|------|--------------|-----------------|----------|\n");
+    for (name, size, padding, _) in type_info.iter().take(20) {
+        let padding_pct = if *size > 0 {
+            (*padding as f64 / *size as f64) * 100.0
+        } else {
+            0.0
+        };
+        report.push_str(&format!("| {} | {} | {} | {:.1}% |\n", name, size, padding, padding_pct));
+    }
+    report.push_str("\n");
+
+    // Types with most padding
+    let mut padding_sorted = type_info.clone();
+    padding_sorted.sort_by(|a, b| b.2.cmp(&a.2));
+
+    report.push_str("## Top 20 Types with Most Padding\n\n");
+    report.push_str("| Type | Size (bytes) | Padding (bytes) | Padding % |\n");
+    report.push_str("|------|--------------|-----------------|----------|\n");
+    for (name, size, padding, _) in padding_sorted.iter().filter(|(_, _, p, _)| *p > 0).take(20) {
+        let padding_pct = if *size > 0 {
+            (*padding as f64 / *size as f64) * 100.0
+        } else {
+            0.0
+        };
+        report.push_str(&format!("| {} | {} | {} | {:.1}% |\n", name, size, padding, padding_pct));
+    }
+    report.push_str("\n");
+
+    // Size distribution by type
+    let mut struct_sizes: Vec<u64> = Vec::new();
+    let mut class_sizes: Vec<u64> = Vec::new();
+    let mut union_sizes: Vec<u64> = Vec::new();
+
+    for (_, size, _, typ) in &type_info {
+        match typ.as_str() {
+            "struct" => struct_sizes.push(*size),
+            "class" => class_sizes.push(*size),
+            "union" => union_sizes.push(*size),
+            _ => {}
+        }
+    }
+
+    report.push_str("## Size Distribution by Category\n\n");
+    report.push_str(&format!("- Structs: {} types, avg size: {} bytes\n",
+        struct_sizes.len(),
+        if !struct_sizes.is_empty() { struct_sizes.iter().sum::<u64>() / struct_sizes.len() as u64 } else { 0 }
+    ));
+    report.push_str(&format!("- Classes: {} types, avg size: {} bytes\n",
+        class_sizes.len(),
+        if !class_sizes.is_empty() { class_sizes.iter().sum::<u64>() / class_sizes.len() as u64 } else { 0 }
+    ));
+    report.push_str(&format!("- Unions: {} types, avg size: {} bytes\n",
+        union_sizes.len(),
+        if !union_sizes.is_empty() { union_sizes.iter().sum::<u64>() / union_sizes.len() as u64 } else { 0 }
+    ));
+
+    // Write report to file
+    let output_dir = Path::new("output");
+    let report_path = output_dir.join("type_analysis_report.md");
+    fs::write(&report_path, report)?;
+    println!("Generated type analysis report: {}", report_path.display());
+
+    Ok(())
+}
+
+fn estimate_member_size(type_info: &TypeInfo) -> u64 {
+    // Same logic as CodeGenerator::estimate_type_size
+    let base_size = if type_info.pointer_count > 0 || type_info.is_function_pointer {
+        4
+    } else {
+        match type_info.base_type.as_str() {
+            "char" | "unsigned char" | "signed char" | "bool" => 1,
+            "short" | "short int" | "unsigned short" | "signed short" => 2,
+            "int" | "unsigned int" | "signed int" => 4,
+            "long" | "unsigned long" | "signed long" => 4,
+            "long long" | "unsigned long long" | "signed long long" => 8,
+            "float" => 4,
+            "double" => 8,
+            "long double" => 12,
+            "void" => 0,
+            s if s.starts_with("GL") => 4,
+            "fpos_t" => 4,
+            _ => 4,
+        }
+    };
+
+    if !type_info.array_sizes.is_empty() {
+        let total_elements: usize = type_info.array_sizes.iter().product();
+        return base_size * (total_elements as u64);
+    }
+
+    base_size
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -2073,6 +2361,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(&output_path, generator.get_output())?;
         println!("Generated: {}", output_path.display());
     }
+
+    // Generate type analysis report
+    generate_type_analysis_report(&compile_units)?;
 
     Ok(())
 }
