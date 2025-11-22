@@ -60,13 +60,10 @@ impl CodeGenerator {
                 "fpos_t" => 4,
                 // For struct/class types, look up the byte_size from parsed types
                 _ => {
-                    // Try to look up the type size in our collected types
-                    if let Some(&size) = self.type_sizes.get(&type_info.base_type) {
-                        size
-                    } else {
-                        // Conservative default if type not found
-                        4
-                    }
+                    // Look up the type size in our collected types
+                    *self.type_sizes.get(&type_info.base_type).unwrap_or_else(|| {
+                        panic!("Unknown type size for '{}'. Add it to the type size map or handle it in estimate_type_size.", type_info.base_type)
+                    })
                 }
             }
         };
