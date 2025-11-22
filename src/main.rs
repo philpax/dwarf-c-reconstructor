@@ -49,6 +49,10 @@ impl TypeInfo {
         if self.is_function_pointer {
             // Function pointer: return_type (*var_name)(params)
             if let Some(ret_type) = &self.function_return_type {
+                // Add const for return type if present
+                if ret_type.is_const {
+                    result.push_str("const ");
+                }
                 result.push_str(&ret_type.base_type);
                 result.push(' ');
                 result.push('(');
@@ -61,6 +65,10 @@ impl TypeInfo {
                 for (i, param) in self.function_params.iter().enumerate() {
                     if i > 0 {
                         result.push_str(", ");
+                    }
+                    // Add const for parameter if present
+                    if param.is_const {
+                        result.push_str("const ");
                     }
                     result.push_str(&param.base_type);
                     if param.pointer_count > 0 {
@@ -76,6 +84,10 @@ impl TypeInfo {
                 result.push_str(")()");
             }
         } else {
+            // Add const qualifier before base type
+            if self.is_const {
+                result.push_str("const ");
+            }
             result.push_str(&self.base_type);
             result.push(' ');
             result.push_str(&"*".repeat(self.pointer_count));
