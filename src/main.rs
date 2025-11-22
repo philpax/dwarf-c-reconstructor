@@ -3,6 +3,7 @@ use object::{Object, ObjectSection};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use cpp_demangle::Symbol;
 
 type DwarfReader = gimli::EndianSlice<'static, gimli::LittleEndian>;
 type DwarfUnit = gimli::Unit<DwarfReader>;
@@ -2138,12 +2139,19 @@ impl CodeGenerator {
     fn generate_function_metadata_comment(&self, func: &Function) -> String {
         let mut comment = String::new();
 
-        // Add linkage name (mangled name) if present
+        // Add linkage name (demangle C++ names if possible, otherwise show raw)
         if let Some(ref linkage_name) = func.linkage_name {
             if !comment.is_empty() {
                 comment.push(' ');
             }
-            comment.push_str(&format!("[mangled: {}]", linkage_name));
+
+            // Try to demangle C++ symbols
+            if let Ok(sym) = Symbol::new(linkage_name.as_bytes()) {
+                comment.push_str(&format!("[{}]", sym));
+            } else {
+                // Not a C++ mangled name (e.g., C function), show as-is
+                comment.push_str(&format!("[{}]", linkage_name));
+            }
         }
 
         // Add artificial flag if it's compiler-generated
