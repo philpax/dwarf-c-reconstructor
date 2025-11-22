@@ -5,6 +5,7 @@ mod types;
 use clap::Parser as ClapParser;
 use generator::CodeGenerator;
 use parser::DwarfParser;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -32,12 +33,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = DwarfParser::new(static_data)?;
     let compile_units = parser.parse()?;
 
+    // Collect all type sizes from all compile units
+    let mut type_sizes = HashMap::new();
+    for cu in &compile_units {
+        CodeGenerator::collect_type_sizes_from_elements(&mut type_sizes, &cu.elements);
+    }
+
     // Generate code for each compile unit
     let output_dir = Path::new(&args.output_dir);
     fs::create_dir_all(output_dir)?;
 
     for cu in &compile_units {
-        let mut generator = CodeGenerator::new();
+        let mut generator = CodeGenerator::with_type_sizes(type_sizes.clone());
         generator.generate_compile_unit(cu);
 
         // Determine output file path, preserving directory structure
