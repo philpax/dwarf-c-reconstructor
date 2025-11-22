@@ -1601,13 +1601,14 @@ impl CodeGenerator {
     }
 
     fn generate_method(&mut self, func: &Function) {
-        let decl = self.generate_function_declaration(func);
-
         if !func.has_body || (func.variables.is_empty() && func.lexical_blocks.is_empty() &&
                                func.inlined_calls.is_empty() && func.labels.is_empty()) {
-            // Method declaration only
-            self.write_line(&format!("{};", decl));
+            // Method declaration only - need to build declaration without embedded line comment
+            // so we can put semicolon before the comment
+            let decl = self.generate_method_declaration(func);
+            self.write_line(&decl);
         } else {
+            let decl = self.generate_function_declaration(func);
             self.write_line(&decl);
             self.write_line("{");
             self.indent_level += 1;
@@ -1615,6 +1616,41 @@ impl CodeGenerator {
             self.indent_level -= 1;
             self.write_line("}");
         }
+    }
+
+    fn generate_method_declaration(&self, func: &Function) -> String {
+        let mut decl = String::new();
+
+        // Return type
+        decl.push_str(&func.return_type.base_type);
+        if func.return_type.pointer_count > 0 {
+            decl.push_str(&"*".repeat(func.return_type.pointer_count));
+        }
+        decl.push(' ');
+
+        // Function name
+        decl.push_str(&func.name);
+        decl.push('(');
+
+        // Parameters (skip 'this' for methods)
+        let params: Vec<_> = func.parameters.iter()
+            .filter(|p| p.name != "this")
+            .collect();
+
+        for (i, param) in params.iter().enumerate() {
+            if i > 0 {
+                decl.push_str(", ");
+            }
+            decl.push_str(&param.type_info.to_string(&param.name));
+        }
+        decl.push_str(");");
+
+        // Add line comment after semicolon
+        if let Some(line) = func.line {
+            decl.push_str(&format!(" //{}", line));
+        }
+
+        decl
     }
 
     fn generate_function(&mut self, func: &Function) {
