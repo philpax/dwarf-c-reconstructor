@@ -1002,8 +1002,12 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: usize,
     ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
-        // Check cache
-        if let Some(cached) = self.type_cache.get(&offset) {
+        // Convert unit-relative offset to absolute offset for caching
+        let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
+        let absolute_offset = unit_start + offset;
+
+        // Check cache using absolute offset
+        if let Some(cached) = self.type_cache.get(&absolute_offset) {
             return Ok(cached.clone());
         }
 
@@ -1012,7 +1016,8 @@ impl DwarfParser {
 
         if let Some((_, type_entry)) = entries.next_dfs()? {
             let type_info = self.resolve_type_entry(unit, type_entry)?;
-            self.type_cache.insert(offset, type_info.clone());
+            // Cache using absolute offset
+            self.type_cache.insert(absolute_offset, type_info.clone());
             return Ok(type_info);
         }
 
@@ -1053,9 +1058,11 @@ impl DwarfParser {
                 // Get array dimensions from subrange children
                 let mut entries = unit.entries_at_offset(entry.offset())?;
                 entries.next_dfs()?; // Skip the array type itself
+                let mut absolute_depth = 0;
 
-                while let Some((depth, child_entry)) = entries.next_dfs()? {
-                    if depth == 0 {
+                while let Some((depth_delta, child_entry)) = entries.next_dfs()? {
+                    absolute_depth += depth_delta;
+                    if absolute_depth <= 0 {
                         break;
                     }
                     if child_entry.tag() == gimli::DW_TAG_subrange_type {
