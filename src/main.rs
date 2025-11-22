@@ -3,7 +3,7 @@ mod parser;
 mod types;
 
 use clap::Parser as ClapParser;
-use generator::{generate_type_analysis_report, CodeGenerator};
+use generator::CodeGenerator;
 use parser::DwarfParser;
 use std::fs;
 use std::path::Path;
@@ -19,10 +19,6 @@ struct Args {
     /// Output directory for generated files
     #[arg(short, long, default_value = "output")]
     output_dir: String,
-
-    /// Skip generating the type analysis report
-    #[arg(long)]
-    skip_report: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -87,11 +83,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         fs::write(&output_path, generator.get_output())?;
         println!("Generated: {}", output_path.display());
-    }
-
-    // Generate type analysis report
-    if !args.skip_report {
-        generate_type_analysis_report(&compile_units)?;
     }
 
     Ok(())
