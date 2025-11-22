@@ -17,6 +17,8 @@ struct TypeInfo {
     is_restrict: bool,
     is_static: bool,
     is_extern: bool,
+    is_reference: bool,       // C++ lvalue reference (T&)
+    is_rvalue_reference: bool, // C++ rvalue reference (T&&)
     // For function pointers
     is_function_pointer: bool,
     function_return_type: Option<Box<TypeInfo>>,
@@ -34,6 +36,8 @@ impl TypeInfo {
             is_restrict: false,
             is_static: false,
             is_extern: false,
+            is_reference: false,
+            is_rvalue_reference: false,
             is_function_pointer: false,
             function_return_type: None,
             function_params: Vec::new(),
@@ -100,7 +104,16 @@ impl TypeInfo {
             }
             result.push_str(&self.base_type);
             result.push(' ');
-            result.push_str(&"*".repeat(self.pointer_count));
+
+            // References and pointers
+            if self.is_rvalue_reference {
+                result.push_str("&&");
+            } else if self.is_reference {
+                result.push('&');
+            } else {
+                result.push_str(&"*".repeat(self.pointer_count));
+            }
+
             result.push_str(var_name);
 
             for size in &self.array_sizes {
@@ -119,6 +132,8 @@ struct Variable {
     line: Option<u64>,
     accessibility: Option<String>,
     offset: Option<u64>,
+    bit_size: Option<u64>,
+    bit_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +185,8 @@ struct Function {
     is_virtual: bool,
     is_constructor: bool,
     is_destructor: bool,
+    linkage_name: Option<String>,
+    is_artificial: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -579,12 +596,16 @@ impl DwarfParser {
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
         let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
+        let linkage_name = self.get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
+            .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
+        let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
 
-        // Detect constructors and destructors by name
-        let is_constructor = is_method && !name.starts_with('~');
+        // Destructor detection by name (~ prefix)
         let is_destructor = is_method && name.starts_with('~');
+        // Constructor detection will happen during generation when we have class name
+        let is_constructor = false;
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, &mut entries)
+        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, linkage_name, is_artificial, &mut entries)
     }
 
     fn parse_lexical_block_offset(
@@ -669,7 +690,9 @@ impl DwarfParser {
                     }
                     gimli::DW_TAG_subprogram => {
                         // This is a method declaration
-                        if let Some(func) = self.parse_function_at(unit, offset, true)? {
+                        if let Some(mut func) = self.parse_function_at(unit, offset, true)? {
+                            // Set the class name for constructor detection
+                            func.class_name = name.clone();
                             methods.push(func);
                         }
                     }
@@ -785,6 +808,9 @@ impl DwarfParser {
         let type_info = self.resolve_type(unit, entry)?;
         let accessibility = self.get_accessibility(entry);
         let offset = self.get_member_offset(unit, entry);
+        let bit_size = self.get_u64_attr(entry, gimli::DW_AT_bit_size);
+        let bit_offset = self.get_u64_attr(entry, gimli::DW_AT_bit_offset)
+            .or_else(|| self.get_u64_attr(entry, gimli::DW_AT_data_bit_offset));
 
         Ok(Some(Variable {
             name,
@@ -792,6 +818,8 @@ impl DwarfParser {
             line,
             accessibility,
             offset,
+            bit_size,
+            bit_offset,
         }))
     }
 
@@ -845,6 +873,8 @@ impl DwarfParser {
             line,
             accessibility: None,
             offset: None,
+            bit_size: None,
+            bit_offset: None,
         }))
     }
 
@@ -875,12 +905,16 @@ impl DwarfParser {
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
         let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
+        let linkage_name = self.get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
+            .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
+        let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
 
-        // Detect constructors and destructors by name
-        let is_constructor = is_method && !name.starts_with('~');
+        // Destructor detection by name (~ prefix)
         let is_destructor = is_method && name.starts_with('~');
+        // Constructor detection will happen during generation when we have class name
+        let is_constructor = false;
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, entries)
+        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, linkage_name, is_artificial, entries)
     }
 
     fn parse_function_children(
@@ -899,6 +933,8 @@ impl DwarfParser {
         is_virtual: bool,
         is_constructor: bool,
         is_destructor: bool,
+        linkage_name: Option<String>,
+        is_artificial: bool,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
         let mut parameters = Vec::new();
@@ -976,6 +1012,8 @@ impl DwarfParser {
             is_virtual,
             is_constructor,
             is_destructor,
+            linkage_name,
+            is_artificial,
         }))
     }
 
@@ -1234,6 +1272,28 @@ impl DwarfParser {
                 } else {
                     let mut type_info = TypeInfo::new("void".to_string());
                     type_info.is_restrict = true;
+                    Ok(type_info)
+                }
+            }
+            gimli::DW_TAG_reference_type => {
+                if let Some(ref_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
+                    let mut type_info = self.resolve_type_from_offset(unit, ref_offset)?;
+                    type_info.is_reference = true;
+                    Ok(type_info)
+                } else {
+                    let mut type_info = TypeInfo::new("void".to_string());
+                    type_info.is_reference = true;
+                    Ok(type_info)
+                }
+            }
+            gimli::DW_TAG_rvalue_reference_type => {
+                if let Some(ref_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
+                    let mut type_info = self.resolve_type_from_offset(unit, ref_offset)?;
+                    type_info.is_rvalue_reference = true;
+                    Ok(type_info)
+                } else {
+                    let mut type_info = TypeInfo::new("void".to_string());
+                    type_info.is_rvalue_reference = true;
                     Ok(type_info)
                 }
             }
@@ -1508,6 +1568,17 @@ impl CodeGenerator {
         }
 
         base_size
+    }
+
+    fn format_member_declaration(&self, var: &Variable) -> String {
+        let mut decl = var.type_info.to_string(&var.name);
+
+        // Add bitfield specification if present
+        if let Some(bit_size) = var.bit_size {
+            decl.push_str(&format!(" : {}", bit_size));
+        }
+
+        decl
     }
 
     fn generate_compile_unit(&mut self, cu: &CompileUnit) {
@@ -1866,7 +1937,7 @@ impl CodeGenerator {
                     }
                 }
 
-                let mut decl = var.type_info.to_string(&var.name);
+                let mut decl = self.format_member_declaration(var);
                 decl.push_str(";");
 
                 // Add line and offset comments
@@ -1874,6 +1945,11 @@ impl CodeGenerator {
                     decl.push_str(&format!(" //{}", line));
                 }
                 decl.push_str(&format!(" @ offset {}", offset));
+
+                // Add bit offset comment if it's a bitfield
+                if let (Some(bit_size), Some(bit_offset)) = (var.bit_size, var.bit_offset) {
+                    decl.push_str(&format!(" [bit offset: {}]", bit_offset));
+                }
 
                 self.write_line(&decl);
 
@@ -1884,7 +1960,7 @@ impl CodeGenerator {
 
             // Output members without offsets at the end
             for var in members.iter().filter(|v| v.offset.is_none()) {
-                let decl = var.type_info.to_string(&var.name);
+                let decl = self.format_member_declaration(var);
                 if let Some(line) = var.line {
                     self.write_line_comment(&format!("{};", decl), &line.to_string());
                 } else {
@@ -1913,8 +1989,18 @@ impl CodeGenerator {
                 let mut type_groups: Vec<Vec<&Variable>> = Vec::new();
 
                 for var in vars {
+                    // Bitfields can't be grouped with other variables
+                    if var.bit_size.is_some() {
+                        type_groups.push(vec![var]);
+                        continue;
+                    }
+
                     let mut added = false;
                     for group in &mut type_groups {
+                        // Don't group with bitfields
+                        if group[0].bit_size.is_some() {
+                            continue;
+                        }
                         if self.types_compatible(&group[0].type_info, &var.type_info) {
                             group.push(var);
                             added = true;
@@ -1929,11 +2015,11 @@ impl CodeGenerator {
                 // Generate declarations
                 let mut decls = Vec::new();
                 for group in type_groups {
-                    // Check if this group contains function pointers - they can't be grouped
-                    if group[0].type_info.is_function_pointer {
-                        // Output function pointers individually
+                    // Check if this group contains function pointers or bitfields - they can't be grouped
+                    if group[0].type_info.is_function_pointer || group[0].bit_size.is_some() {
+                        // Output individually
                         for var in group {
-                            let decl = var.type_info.to_string(&var.name);
+                            let decl = self.format_member_declaration(var);
                             decls.push(decl);
                         }
                     } else {
@@ -1964,7 +2050,8 @@ impl CodeGenerator {
 
             // Variables without line numbers
             for var in no_line_vars {
-                self.write_line(&format!("{};", var.type_info.to_string(&var.name)));
+                let decl = self.format_member_declaration(var);
+                self.write_line(&format!("{};", decl));
             }
         }
     }
@@ -1996,13 +2083,16 @@ impl CodeGenerator {
     fn generate_method_declaration(&self, func: &Function) -> String {
         let mut decl = String::new();
 
+        // Detect constructor: name matches class name
+        let is_constructor = func.class_name.as_ref().map_or(false, |class| class == &func.name);
+
         // Virtual keyword
         if func.is_virtual {
             decl.push_str("virtual ");
         }
 
         // Return type (skip for constructors/destructors)
-        if !func.is_constructor && !func.is_destructor {
+        if !is_constructor && !func.is_destructor {
             decl.push_str(&func.return_type.base_type);
             if func.return_type.pointer_count > 0 {
                 decl.push_str(&"*".repeat(func.return_type.pointer_count));
@@ -2032,7 +2122,39 @@ impl CodeGenerator {
             decl.push_str(&format!(" //{}", line));
         }
 
+        // Add metadata comment (mangled name, artificial flag)
+        let metadata = self.generate_function_metadata_comment(func);
+        if !metadata.is_empty() {
+            if func.line.is_none() {
+                decl.push_str(" //");
+            }
+            decl.push(' ');
+            decl.push_str(&metadata);
+        }
+
         decl
+    }
+
+    fn generate_function_metadata_comment(&self, func: &Function) -> String {
+        let mut comment = String::new();
+
+        // Add linkage name (mangled name) if present
+        if let Some(ref linkage_name) = func.linkage_name {
+            if !comment.is_empty() {
+                comment.push(' ');
+            }
+            comment.push_str(&format!("[mangled: {}]", linkage_name));
+        }
+
+        // Add artificial flag if it's compiler-generated
+        if func.is_artificial {
+            if !comment.is_empty() {
+                comment.push(' ');
+            }
+            comment.push_str("[compiler-generated]");
+        }
+
+        comment
     }
 
     fn generate_function(&mut self, func: &Function) {
@@ -2113,6 +2235,15 @@ impl CodeGenerator {
             if let Some(line) = func.line {
                 decl.push_str(&format!(" //{}", line));
             }
+            // Add metadata comment (mangled name, artificial flag)
+            let metadata = self.generate_function_metadata_comment(func);
+            if !metadata.is_empty() {
+                if func.line.is_none() {
+                    decl.push_str(" //");
+                }
+                decl.push(' ');
+                decl.push_str(&metadata);
+            }
         } else {
             // Check if all params are on same line as function
             let all_same_line = params.iter().all(|p| p.line == func.line);
@@ -2127,6 +2258,15 @@ impl CodeGenerator {
                 decl.push(')');
                 if let Some(line) = func.line {
                     decl.push_str(&format!(" //{}", line));
+                }
+                // Add metadata comment (mangled name, artificial flag)
+                let metadata = self.generate_function_metadata_comment(func);
+                if !metadata.is_empty() {
+                    if func.line.is_none() {
+                        decl.push_str(" //");
+                    }
+                    decl.push(' ');
+                    decl.push_str(&metadata);
                 }
             } else {
                 // Parameters on different lines
@@ -2163,6 +2303,18 @@ impl CodeGenerator {
 
                     if let Some(l) = line {
                         decl.push_str(&format!(" //{}", l));
+                    }
+
+                    // Add metadata comment on the last parameter line
+                    if idx == sorted_lines.len() - 1 {
+                        let metadata = self.generate_function_metadata_comment(func);
+                        if !metadata.is_empty() {
+                            if line.is_none() {
+                                decl.push_str(" //");
+                            }
+                            decl.push(' ');
+                            decl.push_str(&metadata);
+                        }
                     }
 
                     if idx < sorted_lines.len() - 1 {
