@@ -273,19 +273,31 @@ impl DwarfParser {
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         elements: &mut Vec<Element>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut total_depth1 = 0;
+        let mut captured = 0;
+        let mut absolute_depth = 0;  // Track absolute depth
+
         loop {
-            let (depth, entry) = match entries.next_dfs()? {
+            let (depth_delta, entry) = match entries.next_dfs()? {
                 Some(pair) => pair,
                 None => break,
             };
 
-            if depth == 0 {
+            // Update absolute depth based on delta
+            absolute_depth += depth_delta;
+
+            // If we've gone back to compile unit level or beyond, we're done
+            if absolute_depth <= 0 {
                 break;
             }
 
-            if depth == 1 {
+            // Only process direct children of compile unit (absolute depth == 1)
+            if absolute_depth == 1 {
+                total_depth1 += 1;
                 let tag = entry.tag();
                 let offset = entry.offset();
+
+                let captured_before = elements.len();
 
                 match tag {
                     gimli::DW_TAG_namespace => {
@@ -331,6 +343,10 @@ impl DwarfParser {
                     _ => {
                         // Unhandled tag
                     }
+                }
+
+                if elements.len() > captured_before {
+                    captured += 1;
                 }
             }
         }
@@ -399,19 +415,22 @@ impl DwarfParser {
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Namespace>, Box<dyn std::error::Error>> {
         let mut children = Vec::new();
+        let mut absolute_depth = 1;  // We start at the namespace level (depth 1 from compile unit)
 
         // Parse namespace children
         loop {
-            let (depth, child_entry) = match entries.next_dfs()? {
+            let (depth_delta, child_entry) = match entries.next_dfs()? {
                 Some(pair) => pair,
                 None => break,
             };
 
-            if depth <= 1 {
+            absolute_depth += depth_delta;
+
+            if absolute_depth <= 1 {
                 break;
             }
 
-            if depth == 2 {
+            if absolute_depth == 2 {
                 let tag = child_entry.tag();
                 let offset = child_entry.offset();
 
@@ -556,19 +575,22 @@ impl DwarfParser {
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let mut members = Vec::new();
         let mut methods = Vec::new();
+        let mut absolute_depth = 1;  // We start at the struct/union level (depth 1 from compile unit)
 
         // Parse members
         loop {
-            let (depth, child_entry) = match entries.next_dfs()? {
+            let (depth_delta, child_entry) = match entries.next_dfs()? {
                 Some(pair) => pair,
                 None => break,
             };
 
-            if depth <= 1 {
+            absolute_depth += depth_delta;
+
+            if absolute_depth <= 1 {
                 break;
             }
 
-            if depth == 2 {
+            if absolute_depth == 2 {
                 let tag = child_entry.tag();
                 let offset = child_entry.offset();
 
@@ -633,19 +655,22 @@ impl DwarfParser {
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let mut enum_values = Vec::new();
+        let mut absolute_depth = 1;  // We start at the enum level (depth 1 from compile unit)
 
         // Parse enumerators
         loop {
-            let (depth, child_entry) = match entries.next_dfs()? {
+            let (depth_delta, child_entry) = match entries.next_dfs()? {
                 Some(pair) => pair,
                 None => break,
             };
 
-            if depth <= 1 {
+            absolute_depth += depth_delta;
+
+            if absolute_depth <= 1 {
                 break;
             }
 
-            if depth == 2 && child_entry.tag() == gimli::DW_TAG_enumerator {
+            if absolute_depth == 2 && child_entry.tag() == gimli::DW_TAG_enumerator {
                 if let Some(enum_name) = self.get_string_attr(unit, child_entry, gimli::DW_AT_name) {
                     let value = self.get_i64_attr(child_entry, gimli::DW_AT_const_value);
                     enum_values.push((enum_name, value));
@@ -756,19 +781,22 @@ impl DwarfParser {
         let mut lexical_blocks = Vec::new();
         let mut inlined_calls = Vec::new();
         let mut labels = Vec::new();
+        let mut absolute_depth = 1;  // We start at the function level (depth 1 from compile unit)
 
         // Parse function children
         loop {
-            let (depth, child_entry) = match entries.next_dfs()? {
+            let (depth_delta, child_entry) = match entries.next_dfs()? {
                 Some(pair) => pair,
                 None => break,
             };
 
-            if depth <= 1 {
+            absolute_depth += depth_delta;
+
+            if absolute_depth <= 1 {
                 break;
             }
 
-            if depth == 2 {
+            if absolute_depth == 2 {
                 let tag = child_entry.tag();
                 let offset = child_entry.offset();
 
@@ -860,18 +888,21 @@ impl DwarfParser {
         let mut nested_blocks = Vec::new();
         let mut inlined_calls = Vec::new();
         let mut labels = Vec::new();
+        let mut absolute_depth = 2;  // We start at the lexical block level (depth 2 from compile unit)
 
         loop {
-            let (depth, child_entry) = match entries.next_dfs()? {
+            let (depth_delta, child_entry) = match entries.next_dfs()? {
                 Some(pair) => pair,
                 None => break,
             };
 
-            if depth <= 2 {
+            absolute_depth += depth_delta;
+
+            if absolute_depth <= 2 {
                 break;
             }
 
-            if depth == 3 {
+            if absolute_depth == 3 {
                 let tag = child_entry.tag();
                 let offset = child_entry.offset();
 
