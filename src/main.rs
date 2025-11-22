@@ -1,9 +1,9 @@
+use cpp_demangle::Symbol;
 use gimli::{AttributeValue, DebuggingInformationEntry, Dwarf, Reader};
 use object::{Object, ObjectSection};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use cpp_demangle::Symbol;
 
 type DwarfReader = gimli::EndianSlice<'static, gimli::LittleEndian>;
 type DwarfUnit = gimli::Unit<DwarfReader>;
@@ -18,7 +18,7 @@ struct TypeInfo {
     is_restrict: bool,
     is_static: bool,
     is_extern: bool,
-    is_reference: bool,       // C++ lvalue reference (T&)
+    is_reference: bool,        // C++ lvalue reference (T&)
     is_rvalue_reference: bool, // C++ rvalue reference (T&&)
     // For function pointers
     is_function_pointer: bool,
@@ -151,6 +151,7 @@ struct Label {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // line field may be used in future
 struct LexicalBlock {
     variables: Vec<Variable>,
     nested_blocks: Vec<LexicalBlock>,
@@ -166,6 +167,7 @@ struct InlinedSubroutine {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // is_constructor field is used during generation, not read from struct
 struct Function {
     name: String,
     return_type: TypeInfo,
@@ -243,6 +245,7 @@ struct DwarfParser {
     abstract_origins: HashMap<usize, String>,
 }
 
+#[allow(dead_code)] // Some parser methods are called via offset-based parsing
 impl DwarfParser {
     fn new(file_data: &'static [u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let object = object::File::parse(file_data)?;
@@ -314,25 +317,34 @@ impl DwarfParser {
         Ok(())
     }
 
-    fn parse_compile_unit(&mut self, unit: &DwarfUnit) -> Result<Option<CompileUnit>, Box<dyn std::error::Error>> {
+    fn parse_compile_unit(
+        &mut self,
+        unit: &DwarfUnit,
+    ) -> Result<Option<CompileUnit>, Box<dyn std::error::Error>> {
         let mut entries = unit.entries();
 
         if let Some((_, entry)) = entries.next_dfs()? {
             if entry.tag() == gimli::DW_TAG_compile_unit {
-                let name = self.get_string_attr(unit, entry, gimli::DW_AT_name)
+                let name = self
+                    .get_string_attr(unit, entry, gimli::DW_AT_name)
                     .unwrap_or_else(|| "unknown".to_string());
                 let producer = self.get_string_attr(unit, entry, gimli::DW_AT_producer);
 
                 let mut elements = Vec::new();
                 self.parse_children(unit, &mut entries, &mut elements)?;
 
-                return Ok(Some(CompileUnit { name, producer, elements }));
+                return Ok(Some(CompileUnit {
+                    name,
+                    producer,
+                    elements,
+                }));
             }
         }
 
         Ok(None)
     }
 
+    #[allow(unused_variables)] // Statistics tracking variables for debugging
     fn parse_children(
         &mut self,
         unit: &DwarfUnit,
@@ -341,7 +353,7 @@ impl DwarfParser {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut total_depth1 = 0;
         let mut captured = 0;
-        let mut absolute_depth = 0;  // Track absolute depth
+        let mut absolute_depth = 0; // Track absolute depth
 
         loop {
             let (depth_delta, entry) = match entries.next_dfs()? {
@@ -402,8 +414,12 @@ impl DwarfParser {
                         }
                     }
                     // Skip base_type and typedef at top level - they'll be resolved when referenced
-                    gimli::DW_TAG_base_type | gimli::DW_TAG_typedef | gimli::DW_TAG_pointer_type |
-                    gimli::DW_TAG_const_type | gimli::DW_TAG_array_type | gimli::DW_TAG_subroutine_type => {
+                    gimli::DW_TAG_base_type
+                    | gimli::DW_TAG_typedef
+                    | gimli::DW_TAG_pointer_type
+                    | gimli::DW_TAG_const_type
+                    | gimli::DW_TAG_array_type
+                    | gimli::DW_TAG_subroutine_type => {
                         // These are type definitions that we resolve on-demand
                     }
                     _ => {
@@ -481,7 +497,7 @@ impl DwarfParser {
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Namespace>, Box<dyn std::error::Error>> {
         let mut children = Vec::new();
-        let mut absolute_depth = 1;  // We start at the namespace level (depth 1 from compile unit)
+        let mut absolute_depth = 1; // We start at the namespace level (depth 1 from compile unit)
 
         // Parse namespace children
         loop {
@@ -521,7 +537,11 @@ impl DwarfParser {
             }
         }
 
-        Ok(Some(Namespace { name, line, children }))
+        Ok(Some(Namespace {
+            name,
+            line,
+            children,
+        }))
     }
 
     fn parse_compound_offset(
@@ -538,13 +558,24 @@ impl DwarfParser {
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
         let offset_val = entry.offset().0;
-        let (is_typedef, typedef_name, typedef_line) = if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
-            (true, Some(tname.clone()), *tline)
-        } else {
-            (false, None, None)
-        };
+        let (is_typedef, typedef_name, typedef_line) =
+            if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
+                (true, Some(tname.clone()), *tline)
+            } else {
+                (false, None, None)
+            };
 
-        self.parse_compound_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, compound_type, &mut entries)
+        self.parse_compound_children(
+            unit,
+            name,
+            line,
+            byte_size,
+            is_typedef,
+            typedef_name,
+            typedef_line,
+            compound_type,
+            &mut entries,
+        )
     }
 
     fn parse_enum_offset(
@@ -560,13 +591,23 @@ impl DwarfParser {
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
         let offset_val = entry.offset().0;
-        let (is_typedef, typedef_name, typedef_line) = if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
-            (true, Some(tname.clone()), *tline)
-        } else {
-            (false, None, None)
-        };
+        let (is_typedef, typedef_name, typedef_line) =
+            if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
+                (true, Some(tname.clone()), *tline)
+            } else {
+                (false, None, None)
+            };
 
-        self.parse_enum_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, &mut entries)
+        self.parse_enum_children(
+            unit,
+            name,
+            line,
+            byte_size,
+            is_typedef,
+            typedef_name,
+            typedef_line,
+            &mut entries,
+        )
     }
 
     fn parse_function_offset(
@@ -593,11 +634,22 @@ impl DwarfParser {
         let accessibility = self.get_accessibility(entry);
         let has_body = !is_declaration;
         let low_pc = self.get_u64_attr(entry, gimli::DW_AT_low_pc);
-        let high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
+        let mut high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
+
+        // high_pc can be either an absolute address or an offset from low_pc
+        // If we have both and high_pc is small (likely an offset), convert it
+        if let (Some(low), Some(high)) = (low_pc, high_pc) {
+            if high < low {
+                // high_pc is an offset, convert to absolute address
+                high_pc = Some(low + high);
+            }
+        }
+
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
         let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
-        let linkage_name = self.get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
+        let linkage_name = self
+            .get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
             .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
         let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
 
@@ -606,7 +658,25 @@ impl DwarfParser {
         // Constructor detection will happen during generation when we have class name
         let is_constructor = false;
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, linkage_name, is_artificial, &mut entries)
+        self.parse_function_children(
+            unit,
+            name,
+            line,
+            return_type,
+            accessibility,
+            has_body,
+            is_method,
+            low_pc,
+            high_pc,
+            is_inline,
+            is_external,
+            is_virtual,
+            is_constructor,
+            is_destructor,
+            linkage_name,
+            is_artificial,
+            &mut entries,
+        )
     }
 
     fn parse_lexical_block_offset(
@@ -635,13 +705,24 @@ impl DwarfParser {
 
         // Check if typedef
         let offset = entry.offset().0;
-        let (is_typedef, typedef_name, typedef_line) = if let Some((tname, tline)) = self.typedef_map.get(&offset) {
-            (true, Some(tname.clone()), *tline)
-        } else {
-            (false, None, None)
-        };
+        let (is_typedef, typedef_name, typedef_line) =
+            if let Some((tname, tline)) = self.typedef_map.get(&offset) {
+                (true, Some(tname.clone()), *tline)
+            } else {
+                (false, None, None)
+            };
 
-        self.parse_compound_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, compound_type, entries)
+        self.parse_compound_children(
+            unit,
+            name,
+            line,
+            byte_size,
+            is_typedef,
+            typedef_name,
+            typedef_line,
+            compound_type,
+            entries,
+        )
     }
 
     fn parse_compound_children(
@@ -660,7 +741,7 @@ impl DwarfParser {
         let mut methods = Vec::new();
         let mut base_classes = Vec::new();
         let mut is_virtual = false;
-        let mut absolute_depth = 1;  // We start at the struct/union level (depth 1 from compile unit)
+        let mut absolute_depth = 1; // We start at the struct/union level (depth 1 from compile unit)
 
         // Parse members
         loop {
@@ -735,13 +816,23 @@ impl DwarfParser {
 
         // Check if typedef
         let offset = entry.offset().0;
-        let (is_typedef, typedef_name, typedef_line) = if let Some((tname, tline)) = self.typedef_map.get(&offset) {
-            (true, Some(tname.clone()), *tline)
-        } else {
-            (false, None, None)
-        };
+        let (is_typedef, typedef_name, typedef_line) =
+            if let Some((tname, tline)) = self.typedef_map.get(&offset) {
+                (true, Some(tname.clone()), *tline)
+            } else {
+                (false, None, None)
+            };
 
-        self.parse_enum_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, entries)
+        self.parse_enum_children(
+            unit,
+            name,
+            line,
+            byte_size,
+            is_typedef,
+            typedef_name,
+            typedef_line,
+            entries,
+        )
     }
 
     fn parse_enum_children(
@@ -756,7 +847,7 @@ impl DwarfParser {
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let mut enum_values = Vec::new();
-        let mut absolute_depth = 1;  // We start at the enum level (depth 1 from compile unit)
+        let mut absolute_depth = 1; // We start at the enum level (depth 1 from compile unit)
 
         // Parse enumerators
         loop {
@@ -772,7 +863,8 @@ impl DwarfParser {
             }
 
             if absolute_depth == 2 && child_entry.tag() == gimli::DW_TAG_enumerator {
-                if let Some(enum_name) = self.get_string_attr(unit, child_entry, gimli::DW_AT_name) {
+                if let Some(enum_name) = self.get_string_attr(unit, child_entry, gimli::DW_AT_name)
+                {
                     let value = self.get_i64_attr(child_entry, gimli::DW_AT_const_value);
                     enum_values.push((enum_name, value));
                 }
@@ -810,7 +902,8 @@ impl DwarfParser {
         let accessibility = self.get_accessibility(entry);
         let offset = self.get_member_offset(unit, entry);
         let bit_size = self.get_u64_attr(entry, gimli::DW_AT_bit_size);
-        let bit_offset = self.get_u64_attr(entry, gimli::DW_AT_bit_offset)
+        let bit_offset = self
+            .get_u64_attr(entry, gimli::DW_AT_bit_offset)
             .or_else(|| self.get_u64_attr(entry, gimli::DW_AT_data_bit_offset));
 
         Ok(Some(Variable {
@@ -902,11 +995,22 @@ impl DwarfParser {
         let accessibility = self.get_accessibility(entry);
         let has_body = !is_declaration;
         let low_pc = self.get_u64_attr(entry, gimli::DW_AT_low_pc);
-        let high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
+        let mut high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
+
+        // high_pc can be either an absolute address or an offset from low_pc
+        // If we have both and high_pc is small (likely an offset), convert it
+        if let (Some(low), Some(high)) = (low_pc, high_pc) {
+            if high < low {
+                // high_pc is an offset, convert to absolute address
+                high_pc = Some(low + high);
+            }
+        }
+
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
         let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
-        let linkage_name = self.get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
+        let linkage_name = self
+            .get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
             .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
         let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
 
@@ -915,7 +1019,25 @@ impl DwarfParser {
         // Constructor detection will happen during generation when we have class name
         let is_constructor = false;
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, linkage_name, is_artificial, entries)
+        self.parse_function_children(
+            unit,
+            name,
+            line,
+            return_type,
+            accessibility,
+            has_body,
+            is_method,
+            low_pc,
+            high_pc,
+            is_inline,
+            is_external,
+            is_virtual,
+            is_constructor,
+            is_destructor,
+            linkage_name,
+            is_artificial,
+            entries,
+        )
     }
 
     fn parse_function_children(
@@ -943,7 +1065,7 @@ impl DwarfParser {
         let mut lexical_blocks = Vec::new();
         let mut inlined_calls = Vec::new();
         let mut labels = Vec::new();
-        let mut absolute_depth = 1;  // We start at the function level (depth 1 from compile unit)
+        let mut absolute_depth = 1; // We start at the function level (depth 1 from compile unit)
 
         // Parse function children
         loop {
@@ -1059,7 +1181,7 @@ impl DwarfParser {
         let mut nested_blocks = Vec::new();
         let mut inlined_calls = Vec::new();
         let mut labels = Vec::new();
-        let mut absolute_depth = 2;  // We start at the lexical block level (depth 2 from compile unit)
+        let mut absolute_depth = 2; // We start at the lexical block level (depth 2 from compile unit)
 
         loop {
             let (depth_delta, child_entry) = match entries.next_dfs()? {
@@ -1118,7 +1240,9 @@ impl DwarfParser {
         entry: &DebuggingInformationEntry<DwarfReader>,
     ) -> Result<Option<InlinedSubroutine>, Box<dyn std::error::Error>> {
         // Try to get name from abstract origin
-        let name = if let Some(origin_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin) {
+        let name = if let Some(origin_offset) =
+            self.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin)
+        {
             self.abstract_origins.get(&origin_offset).cloned()
         } else {
             None
@@ -1129,7 +1253,8 @@ impl DwarfParser {
             None => return Ok(None),
         };
 
-        let line = self.get_u64_attr(entry, gimli::DW_AT_call_line)
+        let line = self
+            .get_u64_attr(entry, gimli::DW_AT_call_line)
             .or_else(|| self.get_u64_attr(entry, gimli::DW_AT_decl_line));
 
         Ok(Some(InlinedSubroutine { name, line }))
@@ -1197,7 +1322,8 @@ impl DwarfParser {
     ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
         match entry.tag() {
             gimli::DW_TAG_base_type => {
-                let name = self.get_string_attr(unit, entry, gimli::DW_AT_name)
+                let name = self
+                    .get_string_attr(unit, entry, gimli::DW_AT_name)
                     .unwrap_or_else(|| "void".to_string());
                 Ok(TypeInfo::new(name))
             }
@@ -1217,7 +1343,8 @@ impl DwarfParser {
                 }
             }
             gimli::DW_TAG_array_type => {
-                let base_offset = self.get_ref_attr(unit, entry, gimli::DW_AT_type)
+                let base_offset = self
+                    .get_ref_attr(unit, entry, gimli::DW_AT_type)
                     .unwrap_or(0);
                 let mut type_info = self.resolve_type_from_offset(unit, base_offset)?;
 
@@ -1232,9 +1359,13 @@ impl DwarfParser {
                         break;
                     }
                     if child_entry.tag() == gimli::DW_TAG_subrange_type {
-                        let size = if let Some(count) = self.get_u64_attr(child_entry, gimli::DW_AT_count) {
+                        let size = if let Some(count) =
+                            self.get_u64_attr(child_entry, gimli::DW_AT_count)
+                        {
                             count as usize
-                        } else if let Some(upper) = self.get_u64_attr(child_entry, gimli::DW_AT_upper_bound) {
+                        } else if let Some(upper) =
+                            self.get_u64_attr(child_entry, gimli::DW_AT_upper_bound)
+                        {
                             (upper + 1) as usize
                         } else {
                             0
@@ -1299,12 +1430,15 @@ impl DwarfParser {
                 }
             }
             gimli::DW_TAG_typedef => {
-                let name = self.get_string_attr(unit, entry, gimli::DW_AT_name)
+                let name = self
+                    .get_string_attr(unit, entry, gimli::DW_AT_name)
                     .unwrap_or_else(|| "void".to_string());
                 Ok(TypeInfo::new(name))
             }
-            gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type |
-            gimli::DW_TAG_union_type | gimli::DW_TAG_enumeration_type => {
+            gimli::DW_TAG_structure_type
+            | gimli::DW_TAG_class_type
+            | gimli::DW_TAG_union_type
+            | gimli::DW_TAG_enumeration_type => {
                 let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
 
                 if let Some(n) = name {
@@ -1353,7 +1487,9 @@ impl DwarfParser {
                         break;
                     }
                     if child_entry.tag() == gimli::DW_TAG_formal_parameter {
-                        if let Some(param_offset) = self.get_ref_attr(unit, child_entry, gimli::DW_AT_type) {
+                        if let Some(param_offset) =
+                            self.get_ref_attr(unit, child_entry, gimli::DW_AT_type)
+                        {
                             let param_type = self.resolve_type_from_offset(unit, param_offset)?;
                             func_type.function_params.push(param_type);
                         }
@@ -1368,7 +1504,7 @@ impl DwarfParser {
 
     fn get_string_attr(
         &self,
-        unit: &DwarfUnit,
+        _unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
         attr: gimli::DwAt,
     ) -> Option<String> {
@@ -1404,6 +1540,7 @@ impl DwarfParser {
                 AttributeValue::Data2(v) => return Some(v as u64),
                 AttributeValue::Data4(v) => return Some(v as u64),
                 AttributeValue::Data8(v) => return Some(v),
+                AttributeValue::Addr(v) => return Some(v),
                 _ => {}
             }
         }
@@ -1435,9 +1572,8 @@ impl DwarfParser {
         attr: gimli::DwAt,
     ) -> bool {
         if let Some(attr_value) = entry.attr(attr).ok().flatten() {
-            match attr_value.value() {
-                AttributeValue::Flag(v) => return v,
-                _ => {}
+            if let AttributeValue::Flag(v) = attr_value.value() {
+                return v;
             }
         }
         false
@@ -1457,12 +1593,12 @@ impl DwarfParser {
                 AttributeValue::Data8(v) => return Some(v),
                 AttributeValue::Exprloc(expr) => {
                     // Try to evaluate simple DW_OP_plus_uconst expressions
-                    let mut reader = expr.0.clone();
+                    let mut reader = expr.0;
                     let encoding = unit.header.encoding();
-                    if let Ok(op) = gimli::Operation::parse(&mut reader, encoding) {
-                        if let gimli::Operation::PlusConstant { value } = op {
-                            return Some(value);
-                        }
+                    if let Ok(gimli::Operation::PlusConstant { value }) =
+                        gimli::Operation::parse(&mut reader, encoding)
+                    {
+                        return Some(value);
                     }
                 }
                 _ => {}
@@ -1478,18 +1614,14 @@ impl DwarfParser {
         attr: gimli::DwAt,
     ) -> Option<usize> {
         if let Some(attr_value) = entry.attr(attr).ok()? {
-            match attr_value.value() {
-                AttributeValue::UnitRef(offset) => return Some(offset.0),
-                _ => {}
+            if let AttributeValue::UnitRef(offset) = attr_value.value() {
+                return Some(offset.0);
             }
         }
         None
     }
 
-    fn get_accessibility(
-        &self,
-        entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Option<String> {
+    fn get_accessibility(&self, entry: &DebuggingInformationEntry<DwarfReader>) -> Option<String> {
         if let Some(attr_value) = entry.attr(gimli::DW_AT_accessibility).ok()? {
             match attr_value.value() {
                 AttributeValue::Udata(1) => return Some("public".to_string()),
@@ -1743,29 +1875,33 @@ impl CodeGenerator {
             // Add base classes if any (structs can have inheritance in C++)
             if !compound.base_classes.is_empty() {
                 opening.push_str(" : ");
-                let bases: Vec<String> = compound.base_classes.iter().map(|base| {
-                    let mut base_str = String::new();
+                let bases: Vec<String> = compound
+                    .base_classes
+                    .iter()
+                    .map(|base| {
+                        let mut base_str = String::new();
 
-                    // Add accessibility (defaults to public for structs)
-                    if let Some(ref access) = base.accessibility {
-                        base_str.push_str(access);
-                        base_str.push(' ');
-                    }
+                        // Add accessibility (defaults to public for structs)
+                        if let Some(ref access) = base.accessibility {
+                            base_str.push_str(access);
+                            base_str.push(' ');
+                        }
 
-                    // Add virtual keyword if virtual inheritance
-                    if base.is_virtual {
-                        base_str.push_str("virtual ");
-                    }
+                        // Add virtual keyword if virtual inheritance
+                        if base.is_virtual {
+                            base_str.push_str("virtual ");
+                        }
 
-                    base_str.push_str(&base.type_name);
+                        base_str.push_str(&base.type_name);
 
-                    // Add offset comment if available
-                    if let Some(offset) = base.offset {
-                        base_str.push_str(&format!(" /* @ offset {} */", offset));
-                    }
+                        // Add offset comment if available
+                        if let Some(offset) = base.offset {
+                            base_str.push_str(&format!(" /* @ offset {} */", offset));
+                        }
 
-                    base_str
-                }).collect();
+                        base_str
+                    })
+                    .collect();
                 opening.push_str(&bases.join(", "));
             }
 
@@ -1806,34 +1942,41 @@ impl CodeGenerator {
     }
 
     fn generate_class(&mut self, compound: &Compound) {
-        let mut opening = format!("class {}", compound.name.as_ref().unwrap_or(&String::from("unnamed")));
+        let mut opening = format!(
+            "class {}",
+            compound.name.as_ref().unwrap_or(&String::from("unnamed"))
+        );
 
         // Add base classes if any
         if !compound.base_classes.is_empty() {
             opening.push_str(" : ");
-            let bases: Vec<String> = compound.base_classes.iter().map(|base| {
-                let mut base_str = String::new();
+            let bases: Vec<String> = compound
+                .base_classes
+                .iter()
+                .map(|base| {
+                    let mut base_str = String::new();
 
-                // Add accessibility (defaults to private for classes)
-                if let Some(ref access) = base.accessibility {
-                    base_str.push_str(access);
-                    base_str.push(' ');
-                }
+                    // Add accessibility (defaults to private for classes)
+                    if let Some(ref access) = base.accessibility {
+                        base_str.push_str(access);
+                        base_str.push(' ');
+                    }
 
-                // Add virtual keyword if virtual inheritance
-                if base.is_virtual {
-                    base_str.push_str("virtual ");
-                }
+                    // Add virtual keyword if virtual inheritance
+                    if base.is_virtual {
+                        base_str.push_str("virtual ");
+                    }
 
-                base_str.push_str(&base.type_name);
+                    base_str.push_str(&base.type_name);
 
-                // Add offset comment if available
-                if let Some(offset) = base.offset {
-                    base_str.push_str(&format!(" /* @ offset {} */", offset));
-                }
+                    // Add offset comment if available
+                    if let Some(offset) = base.offset {
+                        base_str.push_str(&format!(" /* @ offset {} */", offset));
+                    }
 
-                base_str
-            }).collect();
+                    base_str
+                })
+                .collect();
             opening.push_str(&bases.join(", "));
         }
 
@@ -1874,7 +2017,7 @@ impl CodeGenerator {
         if !private_members.is_empty() || !private_methods.is_empty() {
             self.indent_level += 1;
             self.write_line("private:");
-            self.generate_members(private_members.iter().copied().collect::<Vec<_>>().as_slice());
+            self.generate_members(private_members.to_vec().as_slice());
             for method in &private_methods {
                 self.generate_method(method);
             }
@@ -1884,7 +2027,7 @@ impl CodeGenerator {
         if !protected_members.is_empty() || !protected_methods.is_empty() {
             self.indent_level += 1;
             self.write_line("protected:");
-            self.generate_members(protected_members.iter().copied().collect::<Vec<_>>().as_slice());
+            self.generate_members(protected_members.to_vec().as_slice());
             for method in &protected_methods {
                 self.generate_method(method);
             }
@@ -1894,7 +2037,7 @@ impl CodeGenerator {
         if !public_members.is_empty() || !public_methods.is_empty() {
             self.indent_level += 1;
             self.write_line("public:");
-            self.generate_members(public_members.iter().copied().collect::<Vec<_>>().as_slice());
+            self.generate_members(public_members.to_vec().as_slice());
             for method in &public_methods {
                 self.generate_method(method);
             }
@@ -1918,7 +2061,8 @@ impl CodeGenerator {
 
         if has_any_offsets {
             // Use offset-based ordering with padding detection
-            let mut vars_with_offsets: Vec<_> = members.iter()
+            let mut vars_with_offsets: Vec<_> = members
+                .iter()
                 .filter_map(|v| v.offset.map(|o| (o, *v)))
                 .collect();
             vars_with_offsets.sort_by_key(|(offset, _)| *offset);
@@ -1931,7 +2075,8 @@ impl CodeGenerator {
                 if let Some(prev_end) = prev_end_offset {
                     if offset > prev_end {
                         let padding_bytes = offset - prev_end;
-                        self.write_line(&format!("// [{} byte{} padding for alignment]",
+                        self.write_line(&format!(
+                            "// [{} byte{} padding for alignment]",
                             padding_bytes,
                             if padding_bytes == 1 { "" } else { "s" }
                         ));
@@ -1939,7 +2084,7 @@ impl CodeGenerator {
                 }
 
                 let mut decl = self.format_member_declaration(var);
-                decl.push_str(";");
+                decl.push(';');
 
                 // Add line and offset comments
                 if let Some(line) = var.line {
@@ -1948,7 +2093,7 @@ impl CodeGenerator {
                 decl.push_str(&format!(" @ offset {}", offset));
 
                 // Add bit offset comment if it's a bitfield
-                if let (Some(bit_size), Some(bit_offset)) = (var.bit_size, var.bit_offset) {
+                if let (Some(_bit_size), Some(bit_offset)) = (var.bit_size, var.bit_offset) {
                     decl.push_str(&format!(" [bit offset: {}]", bit_offset));
                 }
 
@@ -1975,7 +2120,7 @@ impl CodeGenerator {
 
             for member in members {
                 if let Some(line) = member.line {
-                    lines.entry(line).or_insert_with(Vec::new).push(member);
+                    lines.entry(line).or_default().push(member);
                 } else {
                     no_line_vars.push(member);
                 }
@@ -2064,8 +2209,12 @@ impl CodeGenerator {
     }
 
     fn generate_method(&mut self, func: &Function) {
-        if !func.has_body || (func.variables.is_empty() && func.lexical_blocks.is_empty() &&
-                               func.inlined_calls.is_empty() && func.labels.is_empty()) {
+        if !func.has_body
+            || (func.variables.is_empty()
+                && func.lexical_blocks.is_empty()
+                && func.inlined_calls.is_empty()
+                && func.labels.is_empty())
+        {
             // Method declaration only - need to build declaration without embedded line comment
             // so we can put semicolon before the comment
             let decl = self.generate_method_declaration(func);
@@ -2085,7 +2234,7 @@ impl CodeGenerator {
         let mut decl = String::new();
 
         // Detect constructor: name matches class name
-        let is_constructor = func.class_name.as_ref().map_or(false, |class| class == &func.name);
+        let is_constructor = func.class_name.as_ref() == Some(&func.name);
 
         // Virtual keyword
         if func.is_virtual {
@@ -2106,7 +2255,9 @@ impl CodeGenerator {
         decl.push('(');
 
         // Parameters (skip 'this' for methods)
-        let params: Vec<_> = func.parameters.iter()
+        let params: Vec<_> = func
+            .parameters
+            .iter()
             .filter(|p| p.name != "this")
             .collect();
 
@@ -2168,29 +2319,44 @@ impl CodeGenerator {
     fn generate_function(&mut self, func: &Function) {
         let decl = self.generate_function_declaration(func);
 
-        if !func.has_body || (func.variables.is_empty() && func.lexical_blocks.is_empty() &&
-                               func.inlined_calls.is_empty() && func.labels.is_empty()) {
-            // Function declaration only - put semicolon on same line
-            let mut comment = String::new();
-            if let Some(line) = func.line {
-                comment.push_str(&format!("//{}", line));
-            }
-            if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
-                let size = high.saturating_sub(low);
-                if !comment.is_empty() {
-                    comment.push(' ');
+        if !func.has_body
+            || (func.variables.is_empty()
+                && func.lexical_blocks.is_empty()
+                && func.inlined_calls.is_empty()
+                && func.labels.is_empty())
+        {
+            // Function declaration only - add semicolon
+            // Check if declaration is multi-line (already has comments embedded)
+            if decl.contains('\n') {
+                // Multi-line declaration - just append semicolon, comments already embedded
+                self.write_line(&format!("{};", decl));
+            } else {
+                // Single-line declaration - add trailing comment
+                let mut comment = String::new();
+                if let Some(line) = func.line {
+                    comment.push_str(&format!("//{}", line));
                 }
-                comment.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
+                if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+                    let size = high.saturating_sub(low);
+                    if !comment.is_empty() {
+                        comment.push(' ');
+                    }
+                    comment.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
+                }
+                if comment.is_empty() {
+                    self.write_line(&format!("{};", decl));
+                } else {
+                    self.write_line(&format!("{}; {}", decl, comment));
+                }
             }
-            self.write_line(&format!("{}; {}", decl, comment));
         } else {
             self.write_line(&decl);
 
             // Check if we have a single lexical block at top level with no other variables
-            let single_block = func.lexical_blocks.len() == 1 &&
-                               func.variables.is_empty() &&
-                               func.inlined_calls.is_empty() &&
-                               func.labels.is_empty();
+            let single_block = func.lexical_blocks.len() == 1
+                && func.variables.is_empty()
+                && func.inlined_calls.is_empty()
+                && func.labels.is_empty();
 
             if single_block {
                 // Use the lexical block's braces
@@ -2210,12 +2376,10 @@ impl CodeGenerator {
         let mut decl = String::new();
 
         // Static/extern specifier (only for non-method functions)
-        if !func.is_method {
-            if !func.is_external {
-                decl.push_str("static ");
-            }
-            // Note: "extern" is implicit for external functions, so we don't output it
+        if !func.is_method && !func.is_external {
+            decl.push_str("static ");
         }
+        // Note: "extern" is implicit for external functions, so we don't output it
 
         // Inline specifier
         if func.is_inline {
@@ -2234,7 +2398,9 @@ impl CodeGenerator {
         decl.push('(');
 
         // Parameters (skip 'this' for methods)
-        let params: Vec<_> = func.parameters.iter()
+        let params: Vec<_> = func
+            .parameters
+            .iter()
             .filter(|p| !(func.is_method && p.name == "this"))
             .collect();
 
@@ -2245,12 +2411,23 @@ impl CodeGenerator {
             }
             // Add metadata comment (mangled name, artificial flag)
             let metadata = self.generate_function_metadata_comment(func);
+            let has_comment = func.line.is_some();
             if !metadata.is_empty() {
                 if func.line.is_none() {
                     decl.push_str(" //");
                 }
                 decl.push(' ');
                 decl.push_str(&metadata);
+            }
+            // Add address information
+            if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+                let size = high.saturating_sub(low);
+                if !has_comment && metadata.is_empty() {
+                    decl.push_str(" //");
+                } else {
+                    decl.push(' ');
+                }
+                decl.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
             }
         } else {
             // Check if all params are on same line as function
@@ -2269,12 +2446,23 @@ impl CodeGenerator {
                 }
                 // Add metadata comment (mangled name, artificial flag)
                 let metadata = self.generate_function_metadata_comment(func);
+                let has_comment = func.line.is_some();
                 if !metadata.is_empty() {
                     if func.line.is_none() {
                         decl.push_str(" //");
                     }
                     decl.push(' ');
                     decl.push_str(&metadata);
+                }
+                // Add address information
+                if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+                    let size = high.saturating_sub(low);
+                    if !has_comment && metadata.is_empty() {
+                        decl.push_str(" //");
+                    } else {
+                        decl.push(' ');
+                    }
+                    decl.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
                 }
             } else {
                 // Parameters on different lines
@@ -2286,7 +2474,7 @@ impl CodeGenerator {
                 // Group parameters by line
                 let mut param_lines: HashMap<Option<u64>, Vec<&Parameter>> = HashMap::new();
                 for param in &params {
-                    param_lines.entry(param.line).or_insert_with(Vec::new).push(param);
+                    param_lines.entry(param.line).or_default().push(param);
                 }
 
                 let mut sorted_lines: Vec<_> = param_lines.iter().collect();
@@ -2313,15 +2501,28 @@ impl CodeGenerator {
                         decl.push_str(&format!(" //{}", l));
                     }
 
-                    // Add metadata comment on the last parameter line
+                    // Add metadata and address on the last parameter line
                     if idx == sorted_lines.len() - 1 {
                         let metadata = self.generate_function_metadata_comment(func);
+                        let has_comment = line.is_some() || !metadata.is_empty();
+
                         if !metadata.is_empty() {
                             if line.is_none() {
                                 decl.push_str(" //");
                             }
                             decl.push(' ');
                             decl.push_str(&metadata);
+                        }
+
+                        // Add address information
+                        if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+                            let size = high.saturating_sub(low);
+                            if !has_comment && metadata.is_empty() {
+                                decl.push_str(" //");
+                            } else {
+                                decl.push(' ');
+                            }
+                            decl.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
                         }
                     }
 
@@ -2341,7 +2542,10 @@ impl CodeGenerator {
 
         // Inlined calls
         for inlined in &func.inlined_calls {
-            let line_comment = inlined.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+            let line_comment = inlined
+                .line
+                .map(|l| format!(" //{}", l))
+                .unwrap_or_default();
             self.write_line(&format!("{}();{}", inlined.name, line_comment));
         }
 
@@ -2364,7 +2568,7 @@ impl CodeGenerator {
 
         for var in variables {
             if let Some(line) = var.line {
-                lines.entry(line).or_insert_with(Vec::new).push(var);
+                lines.entry(line).or_default().push(var);
             } else {
                 no_line_vars.push(var);
             }
@@ -2443,7 +2647,10 @@ impl CodeGenerator {
 
         // Inlined calls
         for inlined in &block.inlined_calls {
-            let line_comment = inlined.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+            let line_comment = inlined
+                .line
+                .map(|l| format!(" //{}", l))
+                .unwrap_or_default();
             self.write_line(&format!("{}();{}", inlined.name, line_comment));
         }
 
@@ -2464,7 +2671,11 @@ impl CodeGenerator {
 
     fn generate_global_variable(&mut self, var: &Variable) {
         let line_comment = var.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-        self.write_line(&format!("{};{}", var.type_info.to_string(&var.name), line_comment));
+        self.write_line(&format!(
+            "{};{}",
+            var.type_info.to_string(&var.name),
+            line_comment
+        ));
     }
 
     fn get_output(self) -> String {
@@ -2472,7 +2683,9 @@ impl CodeGenerator {
     }
 }
 
-fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_type_analysis_report(
+    compile_units: &[CompileUnit],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut type_info = Vec::new();
 
     // Collect all types with size information
@@ -2491,7 +2704,9 @@ fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Bo
                     // Calculate total padding if members have offsets
                     let mut total_padding = 0u64;
                     if !compound.members.is_empty() {
-                        let members_with_offsets: Vec<_> = compound.members.iter()
+                        let members_with_offsets: Vec<_> = compound
+                            .members
+                            .iter()
                             .filter_map(|m| m.offset.map(|o| (o, m)))
                             .collect();
 
@@ -2541,16 +2756,22 @@ fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Bo
     let total_padding: u64 = type_info.iter().map(|(_, _, p, _)| p).sum();
     let types_with_padding = type_info.iter().filter(|(_, _, p, _)| *p > 0).count();
 
-    report.push_str(&format!("## Summary\n\n"));
+    report.push_str("## Summary\n\n");
     report.push_str(&format!("- Total types analyzed: {}\n", total_types));
-    report.push_str(&format!("- Total size of all types: {} bytes\n", total_size));
-    report.push_str(&format!("- Total padding across all types: {} bytes\n", total_padding));
+    report.push_str(&format!(
+        "- Total size of all types: {} bytes\n",
+        total_size
+    ));
+    report.push_str(&format!(
+        "- Total padding across all types: {} bytes\n",
+        total_padding
+    ));
     report.push_str(&format!("- Types with padding: {}\n", types_with_padding));
     if total_size > 0 {
         let padding_percent = (total_padding as f64 / total_size as f64) * 100.0;
         report.push_str(&format!("- Padding overhead: {:.2}%\n", padding_percent));
     }
-    report.push_str("\n");
+    report.push('\n');
 
     // Top 20 largest types
     report.push_str("## Top 20 Largest Types\n\n");
@@ -2562,9 +2783,12 @@ fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Bo
         } else {
             0.0
         };
-        report.push_str(&format!("| {} | {} | {} | {:.1}% |\n", name, size, padding, padding_pct));
+        report.push_str(&format!(
+            "| {} | {} | {} | {:.1}% |\n",
+            name, size, padding, padding_pct
+        ));
     }
-    report.push_str("\n");
+    report.push('\n');
 
     // Types with most padding
     let mut padding_sorted = type_info.clone();
@@ -2579,9 +2803,12 @@ fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Bo
         } else {
             0.0
         };
-        report.push_str(&format!("| {} | {} | {} | {:.1}% |\n", name, size, padding, padding_pct));
+        report.push_str(&format!(
+            "| {} | {} | {} | {:.1}% |\n",
+            name, size, padding, padding_pct
+        ));
     }
-    report.push_str("\n");
+    report.push('\n');
 
     // Size distribution by type
     let mut struct_sizes: Vec<u64> = Vec::new();
@@ -2598,17 +2825,32 @@ fn generate_type_analysis_report(compile_units: &[CompileUnit]) -> Result<(), Bo
     }
 
     report.push_str("## Size Distribution by Category\n\n");
-    report.push_str(&format!("- Structs: {} types, avg size: {} bytes\n",
+    report.push_str(&format!(
+        "- Structs: {} types, avg size: {} bytes\n",
         struct_sizes.len(),
-        if !struct_sizes.is_empty() { struct_sizes.iter().sum::<u64>() / struct_sizes.len() as u64 } else { 0 }
+        if !struct_sizes.is_empty() {
+            struct_sizes.iter().sum::<u64>() / struct_sizes.len() as u64
+        } else {
+            0
+        }
     ));
-    report.push_str(&format!("- Classes: {} types, avg size: {} bytes\n",
+    report.push_str(&format!(
+        "- Classes: {} types, avg size: {} bytes\n",
         class_sizes.len(),
-        if !class_sizes.is_empty() { class_sizes.iter().sum::<u64>() / class_sizes.len() as u64 } else { 0 }
+        if !class_sizes.is_empty() {
+            class_sizes.iter().sum::<u64>() / class_sizes.len() as u64
+        } else {
+            0
+        }
     ));
-    report.push_str(&format!("- Unions: {} types, avg size: {} bytes\n",
+    report.push_str(&format!(
+        "- Unions: {} types, avg size: {} bytes\n",
         union_sizes.len(),
-        if !union_sizes.is_empty() { union_sizes.iter().sum::<u64>() / union_sizes.len() as u64 } else { 0 }
+        if !union_sizes.is_empty() {
+            union_sizes.iter().sum::<u64>() / union_sizes.len() as u64
+        } else {
+            0
+        }
     ));
 
     // Write report to file
