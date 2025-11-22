@@ -108,6 +108,7 @@ struct Variable {
     type_info: TypeInfo,
     line: Option<u64>,
     accessibility: Option<String>,
+    offset: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +166,7 @@ struct Compound {
     is_typedef: bool,
     typedef_name: Option<String>,
     typedef_line: Option<u64>,
+    byte_size: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -185,6 +187,7 @@ enum Element {
 #[derive(Debug)]
 struct CompileUnit {
     name: String,
+    producer: Option<String>,
     elements: Vec<Element>,
 }
 
@@ -273,11 +276,12 @@ impl DwarfParser {
             if entry.tag() == gimli::DW_TAG_compile_unit {
                 let name = self.get_string_attr(unit, entry, gimli::DW_AT_name)
                     .unwrap_or_else(|| "unknown".to_string());
+                let producer = self.get_string_attr(unit, entry, gimli::DW_AT_producer);
 
                 let mut elements = Vec::new();
                 self.parse_children(unit, &mut entries, &mut elements)?;
 
-                return Ok(Some(CompileUnit { name, elements }));
+                return Ok(Some(CompileUnit { name, producer, elements }));
             }
         }
 
@@ -486,6 +490,7 @@ impl DwarfParser {
 
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
+        let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
         let offset_val = entry.offset().0;
         let (is_typedef, typedef_name, typedef_line) = if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
@@ -494,7 +499,7 @@ impl DwarfParser {
             (false, None, None)
         };
 
-        self.parse_compound_children(unit, name, line, is_typedef, typedef_name, typedef_line, compound_type, &mut entries)
+        self.parse_compound_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, compound_type, &mut entries)
     }
 
     fn parse_enum_offset(
@@ -507,6 +512,7 @@ impl DwarfParser {
 
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
+        let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
         let offset_val = entry.offset().0;
         let (is_typedef, typedef_name, typedef_line) = if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
@@ -515,7 +521,7 @@ impl DwarfParser {
             (false, None, None)
         };
 
-        self.parse_enum_children(unit, name, line, is_typedef, typedef_name, typedef_line, &mut entries)
+        self.parse_enum_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, &mut entries)
     }
 
     fn parse_function_offset(
@@ -567,6 +573,7 @@ impl DwarfParser {
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
+        let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
         // Check if typedef
         let offset = entry.offset().0;
@@ -576,7 +583,7 @@ impl DwarfParser {
             (false, None, None)
         };
 
-        self.parse_compound_children(unit, name, line, is_typedef, typedef_name, typedef_line, compound_type, entries)
+        self.parse_compound_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, compound_type, entries)
     }
 
     fn parse_compound_children(
@@ -584,6 +591,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         name: Option<String>,
         line: Option<u64>,
+        byte_size: Option<u64>,
         is_typedef: bool,
         typedef_name: Option<String>,
         typedef_line: Option<u64>,
@@ -638,6 +646,7 @@ impl DwarfParser {
             is_typedef,
             typedef_name,
             typedef_line,
+            byte_size,
         }))
     }
 
@@ -649,6 +658,7 @@ impl DwarfParser {
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
+        let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
         // Check if typedef
         let offset = entry.offset().0;
@@ -658,7 +668,7 @@ impl DwarfParser {
             (false, None, None)
         };
 
-        self.parse_enum_children(unit, name, line, is_typedef, typedef_name, typedef_line, entries)
+        self.parse_enum_children(unit, name, line, byte_size, is_typedef, typedef_name, typedef_line, entries)
     }
 
     fn parse_enum_children(
@@ -666,6 +676,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         name: Option<String>,
         line: Option<u64>,
+        byte_size: Option<u64>,
         is_typedef: bool,
         typedef_name: Option<String>,
         typedef_line: Option<u64>,
@@ -705,6 +716,7 @@ impl DwarfParser {
             is_typedef,
             typedef_name,
             typedef_line,
+            byte_size,
         }))
     }
 
@@ -721,12 +733,14 @@ impl DwarfParser {
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let type_info = self.resolve_type(unit, entry)?;
         let accessibility = self.get_accessibility(entry);
+        let offset = self.get_member_offset(unit, entry);
 
         Ok(Some(Variable {
             name,
             type_info,
             line,
             accessibility,
+            offset,
         }))
     }
 
@@ -753,6 +767,7 @@ impl DwarfParser {
             type_info,
             line,
             accessibility: None,
+            offset: None,
         }))
     }
 
@@ -1245,6 +1260,34 @@ impl DwarfParser {
         false
     }
 
+    fn get_member_offset(
+        &self,
+        unit: &DwarfUnit,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Option<u64> {
+        if let Some(attr_value) = entry.attr(gimli::DW_AT_data_member_location).ok()? {
+            match attr_value.value() {
+                AttributeValue::Udata(v) => return Some(v),
+                AttributeValue::Data1(v) => return Some(v as u64),
+                AttributeValue::Data2(v) => return Some(v as u64),
+                AttributeValue::Data4(v) => return Some(v as u64),
+                AttributeValue::Data8(v) => return Some(v),
+                AttributeValue::Exprloc(expr) => {
+                    // Try to evaluate simple DW_OP_plus_uconst expressions
+                    let mut reader = expr.0.clone();
+                    let encoding = unit.header.encoding();
+                    if let Ok(op) = gimli::Operation::parse(&mut reader, encoding) {
+                        if let gimli::Operation::PlusConstant { value } = op {
+                            return Some(value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn get_ref_attr(
         &self,
         _unit: &DwarfUnit,
@@ -1310,6 +1353,9 @@ impl CodeGenerator {
 
     fn generate_compile_unit(&mut self, cu: &CompileUnit) {
         self.write_line_comment("", &cu.name);
+        if let Some(ref producer) = cu.producer {
+            self.write_line(&format!("// Compiler: {}", producer));
+        }
         self.output.push('\n');
 
         for element in &cu.elements {
@@ -1385,7 +1431,7 @@ impl CodeGenerator {
         self.indent_level += 1;
         for (name, value) in &compound.enum_values {
             if let Some(v) = value {
-                self.write_line(&format!("{} = {},", name, v));
+                self.write_line(&format!("{} = {}, // 0x{:x}", name, v, v));
             } else {
                 self.write_line(&format!("{},", name));
             }
@@ -1403,6 +1449,11 @@ impl CodeGenerator {
 
         if let Some(tline) = compound.typedef_line {
             closing.push_str(&format!(" //{}", tline));
+        }
+
+        // Add size comment
+        if let Some(size) = compound.byte_size {
+            closing.push_str(&format!(" - sizeof: {}", size));
         }
 
         self.write_line(&closing);
@@ -1435,6 +1486,11 @@ impl CodeGenerator {
 
             if let Some(line_num) = compound.typedef_line.or(compound.line) {
                 line.push_str(&format!(" //{}", line_num));
+            }
+
+            // Add size comment
+            if let Some(size) = compound.byte_size {
+                line.push_str(&format!(" - sizeof: {}", size));
             }
 
             self.write_line(&line);
@@ -1479,6 +1535,11 @@ impl CodeGenerator {
 
             if let Some(tline) = compound.typedef_line {
                 closing.push_str(&format!(" //{}", tline));
+            }
+
+            // Add size comment
+            if let Some(size) = compound.byte_size {
+                closing.push_str(&format!(" - sizeof: {}", size));
             }
 
             self.write_line(&closing);
@@ -1551,7 +1612,12 @@ impl CodeGenerator {
             self.indent_level -= 1;
         }
 
-        self.write_line("};");
+        let mut closing = String::from("};");
+        // Add size comment
+        if let Some(size) = compound.byte_size {
+            closing.push_str(&format!(" // sizeof: {}", size));
+        }
+        self.write_line(&closing);
     }
 
     fn generate_members(&mut self, members: &[&Variable]) {
@@ -1572,57 +1638,78 @@ impl CodeGenerator {
         sorted_lines.sort_by_key(|(line, _)| *line);
 
         for (line, vars) in sorted_lines {
-            // Group by type compatibility
-            let mut type_groups: Vec<Vec<&Variable>> = Vec::new();
+            // Check if any variable has offset information
+            let has_offsets = vars.iter().any(|v| v.offset.is_some());
 
-            for var in vars {
-                let mut added = false;
-                for group in &mut type_groups {
-                    if self.types_compatible(&group[0].type_info, &var.type_info) {
-                        group.push(var);
-                        added = true;
-                        break;
+            if has_offsets {
+                // Output members individually with offset information
+                for var in vars {
+                    let mut decl = var.type_info.to_string(&var.name);
+                    decl.push_str(";");
+
+                    // Add line comment
+                    decl.push_str(&format!(" //{}", line));
+
+                    // Add offset if available
+                    if let Some(offset) = var.offset {
+                        decl.push_str(&format!(" @ offset {}", offset));
+                    }
+
+                    self.write_line(&decl);
+                }
+            } else {
+                // Group by type compatibility
+                let mut type_groups: Vec<Vec<&Variable>> = Vec::new();
+
+                for var in vars {
+                    let mut added = false;
+                    for group in &mut type_groups {
+                        if self.types_compatible(&group[0].type_info, &var.type_info) {
+                            group.push(var);
+                            added = true;
+                            break;
+                        }
+                    }
+                    if !added {
+                        type_groups.push(vec![var]);
                     }
                 }
-                if !added {
-                    type_groups.push(vec![var]);
-                }
-            }
 
-            // Generate declarations
-            let mut decls = Vec::new();
-            for group in type_groups {
-                // Check if this group contains function pointers - they can't be grouped
-                if group[0].type_info.is_function_pointer {
-                    // Output function pointers individually
-                    for var in group {
-                        let decl = var.type_info.to_string(&var.name);
-                        decls.push(decl);
-                    }
-                } else {
-                    let base_type = &group[0].type_info;
-                    let mut var_names = Vec::new();
+                // Generate declarations
+                let mut decls = Vec::new();
+                for group in type_groups {
+                    // Check if this group contains function pointers - they can't be grouped
+                    if group[0].type_info.is_function_pointer {
+                        // Output function pointers individually
+                        for var in group {
+                            let decl = var.type_info.to_string(&var.name);
+                            decls.push(decl);
+                        }
+                    } else {
+                        let base_type = &group[0].type_info;
+                        let mut var_names = Vec::new();
 
-                    for var in group {
-                        let ptr_str = "*".repeat(var.type_info.pointer_count);
-                        let mut name_with_array = format!("{}{}", ptr_str, var.name);
+                        for var in group {
+                            let ptr_str = "*".repeat(var.type_info.pointer_count);
+                            let mut name_with_array = format!("{}{}", ptr_str, var.name);
 
-                        for size in &var.type_info.array_sizes {
-                            name_with_array.push_str(&format!("[{}]", size));
+                            for size in &var.type_info.array_sizes {
+                                name_with_array.push_str(&format!("[{}]", size));
+                            }
+
+                            var_names.push(name_with_array);
                         }
 
-                        var_names.push(name_with_array);
+                        let mut decl = base_type.base_type.clone();
+                        decl.push(' ');
+                        decl.push_str(&var_names.join(", "));
+                        decls.push(decl);
                     }
-
-                    let mut decl = base_type.base_type.clone();
-                    decl.push(' ');
-                    decl.push_str(&var_names.join(", "));
-                    decls.push(decl);
                 }
-            }
 
-            let full_decl = decls.join("; ");
-            self.write_line_comment(&format!("{};", full_decl), &line.to_string());
+                let full_decl = decls.join("; ");
+                self.write_line_comment(&format!("{};", full_decl), &line.to_string());
+            }
         }
 
         // Variables without line numbers
