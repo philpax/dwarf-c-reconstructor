@@ -52,6 +52,8 @@ impl TypeInfo {
                 result.push_str(&ret_type.base_type);
                 result.push(' ');
                 result.push('(');
+                // Function pointers always need at least one asterisk
+                result.push('*');
                 result.push_str(&"*".repeat(self.pointer_count));
                 result.push_str(var_name);
                 result.push_str(")(");
@@ -61,7 +63,10 @@ impl TypeInfo {
                         result.push_str(", ");
                     }
                     result.push_str(&param.base_type);
-                    result.push_str(&" *".repeat(param.pointer_count));
+                    if param.pointer_count > 0 {
+                        result.push(' ');
+                        result.push_str(&"*".repeat(param.pointer_count));
+                    }
                 }
 
                 result.push(')');
@@ -1028,7 +1033,11 @@ impl DwarfParser {
             gimli::DW_TAG_pointer_type => {
                 if let Some(pointed_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
                     let mut type_info = self.resolve_type_from_offset(unit, pointed_offset)?;
-                    type_info.pointer_count += 1;
+                    // Special case: pointer to subroutine is already a function pointer,
+                    // don't increment pointer_count
+                    if !type_info.is_function_pointer {
+                        type_info.pointer_count += 1;
+                    }
                     Ok(type_info)
                 } else {
                     let mut type_info = TypeInfo::new("void".to_string());
@@ -1564,24 +1573,33 @@ impl CodeGenerator {
             // Generate declarations
             let mut decls = Vec::new();
             for group in type_groups {
-                let base_type = &group[0].type_info;
-                let mut var_names = Vec::new();
+                // Check if this group contains function pointers - they can't be grouped
+                if group[0].type_info.is_function_pointer {
+                    // Output function pointers individually
+                    for var in group {
+                        let decl = var.type_info.to_string(&var.name);
+                        decls.push(decl);
+                    }
+                } else {
+                    let base_type = &group[0].type_info;
+                    let mut var_names = Vec::new();
 
-                for var in group {
-                    let ptr_str = "*".repeat(var.type_info.pointer_count);
-                    let mut name_with_array = format!("{}{}", ptr_str, var.name);
+                    for var in group {
+                        let ptr_str = "*".repeat(var.type_info.pointer_count);
+                        let mut name_with_array = format!("{}{}", ptr_str, var.name);
 
-                    for size in &var.type_info.array_sizes {
-                        name_with_array.push_str(&format!("[{}]", size));
+                        for size in &var.type_info.array_sizes {
+                            name_with_array.push_str(&format!("[{}]", size));
+                        }
+
+                        var_names.push(name_with_array);
                     }
 
-                    var_names.push(name_with_array);
+                    let mut decl = base_type.base_type.clone();
+                    decl.push(' ');
+                    decl.push_str(&var_names.join(", "));
+                    decls.push(decl);
                 }
-
-                let mut decl = base_type.base_type.clone();
-                decl.push(' ');
-                decl.push_str(&var_names.join(", "));
-                decls.push(decl);
             }
 
             let full_decl = decls.join("; ");
@@ -1830,24 +1848,33 @@ impl CodeGenerator {
             // Generate declarations
             let mut decls = Vec::new();
             for group in type_groups {
-                let base_type = &group[0].type_info;
-                let mut var_names = Vec::new();
+                // Check if this group contains function pointers - they can't be grouped
+                if group[0].type_info.is_function_pointer {
+                    // Output function pointers individually
+                    for var in group {
+                        let decl = var.type_info.to_string(&var.name);
+                        decls.push(decl);
+                    }
+                } else {
+                    let base_type = &group[0].type_info;
+                    let mut var_names = Vec::new();
 
-                for var in group {
-                    let ptr_str = "*".repeat(var.type_info.pointer_count);
-                    let mut name_with_array = format!("{}{}", ptr_str, var.name);
+                    for var in group {
+                        let ptr_str = "*".repeat(var.type_info.pointer_count);
+                        let mut name_with_array = format!("{}{}", ptr_str, var.name);
 
-                    for size in &var.type_info.array_sizes {
-                        name_with_array.push_str(&format!("[{}]", size));
+                        for size in &var.type_info.array_sizes {
+                            name_with_array.push_str(&format!("[{}]", size));
+                        }
+
+                        var_names.push(name_with_array);
                     }
 
-                    var_names.push(name_with_array);
+                    let mut decl = base_type.base_type.clone();
+                    decl.push(' ');
+                    decl.push_str(&var_names.join(", "));
+                    decls.push(decl);
                 }
-
-                let mut decl = base_type.base_type.clone();
-                decl.push(' ');
-                decl.push_str(&var_names.join(", "));
-                decls.push(decl);
             }
 
             let full_decl = decls.join("; ");
