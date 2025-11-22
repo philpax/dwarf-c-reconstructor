@@ -246,6 +246,8 @@ struct DwarfParser {
 }
 
 #[allow(dead_code)] // Some parser methods are called via offset-based parsing
+#[allow(clippy::too_many_arguments)] // Parser methods need many parameters from DWARF
+#[allow(clippy::while_let_loop)] // Some loops are clearer with explicit match
 impl DwarfParser {
     fn new(file_data: &'static [u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let object = object::File::parse(file_data)?;
@@ -2317,6 +2319,12 @@ impl CodeGenerator {
     }
 
     fn generate_function(&mut self, func: &Function) {
+        // Write address comment above function if available
+        if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+            let size = high.saturating_sub(low);
+            self.write_line(&format!("// @ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
+        }
+
         let decl = self.generate_function_declaration(func);
 
         if !func.has_body
@@ -2326,29 +2334,9 @@ impl CodeGenerator {
                 && func.labels.is_empty())
         {
             // Function declaration only - add semicolon
-            // Check if declaration is multi-line (already has comments embedded)
-            if decl.contains('\n') {
-                // Multi-line declaration - just append semicolon, comments already embedded
-                self.write_line(&format!("{};", decl));
-            } else {
-                // Single-line declaration - add trailing comment
-                let mut comment = String::new();
-                if let Some(line) = func.line {
-                    comment.push_str(&format!("//{}", line));
-                }
-                if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
-                    let size = high.saturating_sub(low);
-                    if !comment.is_empty() {
-                        comment.push(' ');
-                    }
-                    comment.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
-                }
-                if comment.is_empty() {
-                    self.write_line(&format!("{};", decl));
-                } else {
-                    self.write_line(&format!("{}; {}", decl, comment));
-                }
-            }
+            // The declaration may be multi-line with embedded line comments
+            // Semicolon should be appended to the declaration string itself
+            self.write_line(&format!("{};", decl));
         } else {
             self.write_line(&decl);
 
@@ -2411,23 +2399,12 @@ impl CodeGenerator {
             }
             // Add metadata comment (mangled name, artificial flag)
             let metadata = self.generate_function_metadata_comment(func);
-            let has_comment = func.line.is_some();
             if !metadata.is_empty() {
                 if func.line.is_none() {
                     decl.push_str(" //");
                 }
                 decl.push(' ');
                 decl.push_str(&metadata);
-            }
-            // Add address information
-            if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
-                let size = high.saturating_sub(low);
-                if !has_comment && metadata.is_empty() {
-                    decl.push_str(" //");
-                } else {
-                    decl.push(' ');
-                }
-                decl.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
             }
         } else {
             // Check if all params are on same line as function
@@ -2446,23 +2423,12 @@ impl CodeGenerator {
                 }
                 // Add metadata comment (mangled name, artificial flag)
                 let metadata = self.generate_function_metadata_comment(func);
-                let has_comment = func.line.is_some();
                 if !metadata.is_empty() {
                     if func.line.is_none() {
                         decl.push_str(" //");
                     }
                     decl.push(' ');
                     decl.push_str(&metadata);
-                }
-                // Add address information
-                if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
-                    let size = high.saturating_sub(low);
-                    if !has_comment && metadata.is_empty() {
-                        decl.push_str(" //");
-                    } else {
-                        decl.push(' ');
-                    }
-                    decl.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
                 }
             } else {
                 // Parameters on different lines
@@ -2501,28 +2467,15 @@ impl CodeGenerator {
                         decl.push_str(&format!(" //{}", l));
                     }
 
-                    // Add metadata and address on the last parameter line
+                    // Add metadata on the last parameter line
                     if idx == sorted_lines.len() - 1 {
                         let metadata = self.generate_function_metadata_comment(func);
-                        let has_comment = line.is_some() || !metadata.is_empty();
-
                         if !metadata.is_empty() {
                             if line.is_none() {
                                 decl.push_str(" //");
                             }
                             decl.push(' ');
                             decl.push_str(&metadata);
-                        }
-
-                        // Add address information
-                        if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
-                            let size = high.saturating_sub(low);
-                            if !has_comment && metadata.is_empty() {
-                                decl.push_str(" //");
-                            } else {
-                                decl.push(' ');
-                            }
-                            decl.push_str(&format!("@ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
                         }
                     }
 
