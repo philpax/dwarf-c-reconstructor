@@ -1,6 +1,10 @@
 [package]
 name = "dwarf-c-reconstructor"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+gimli = "0.31"
+object = "0.36"
+memmap2 = "0.9"
+cpp_demangle = "0.4"
