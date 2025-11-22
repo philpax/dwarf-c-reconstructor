@@ -11,14 +11,6 @@ pub struct CodeGenerator {
 }
 
 impl CodeGenerator {
-    pub fn new() -> Self {
-        CodeGenerator {
-            output: String::new(),
-            indent_level: 0,
-            type_sizes: HashMap::new(),
-        }
-    }
-
     pub fn with_type_sizes(type_sizes: HashMap<String, u64>) -> Self {
         CodeGenerator {
             output: String::new(),
@@ -54,10 +46,15 @@ impl CodeGenerator {
             // Calculate size based on base type
             match type_info.base_type.as_str() {
                 "char" | "unsigned char" | "signed char" | "bool" => 1,
-                "short" | "short int" | "unsigned short" | "signed short" | "short unsigned int" => 2,
+                "short" | "short int" | "unsigned short" | "signed short"
+                | "short unsigned int" => 2,
                 "int" | "unsigned int" | "signed int" => 4,
                 "long" | "unsigned long" | "signed long" | "long int" | "long unsigned int" => 4, // 32-bit long
-                "long long" | "unsigned long long" | "signed long long" | "long long int" | "long long unsigned int" => 8,
+                "long long"
+                | "unsigned long long"
+                | "signed long long"
+                | "long long int"
+                | "long long unsigned int" => 8,
                 "float" => 4,
                 "double" => 8,
                 "long double" => 12, // x86 extended precision
