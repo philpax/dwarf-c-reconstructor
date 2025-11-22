@@ -2917,19 +2917,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut generator = CodeGenerator::new();
         generator.generate_compile_unit(cu);
 
-        // Determine output file name
-        let output_name = if cu.name.is_empty() {
+        // Determine output file path, preserving directory structure
+        let output_rel_path = if cu.name.is_empty() {
             "unknown.c".to_string()
         } else {
-            // Extract just the filename from the path
-            Path::new(&cu.name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown.c")
-                .to_string()
+            // Normalize and clean up the path
+            let path = Path::new(&cu.name);
+
+            // Convert to a clean relative path, removing .. and . components
+            let mut components = Vec::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::Normal(c) => {
+                        components.push(c.to_str().unwrap_or("unknown"));
+                    }
+                    std::path::Component::ParentDir => {
+                        // Skip parent directory references for cleaner output
+                        if !components.is_empty() {
+                            components.pop();
+                        }
+                    }
+                    std::path::Component::CurDir => {
+                        // Skip current directory references
+                    }
+                    _ => {}
+                }
+            }
+
+            if components.is_empty() {
+                "unknown.c".to_string()
+            } else {
+                components.join("/")
+            }
         };
 
-        let output_path = output_dir.join(&output_name);
+        let output_path = output_dir.join(&output_rel_path);
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         fs::write(&output_path, generator.get_output())?;
         println!("Generated: {}", output_path.display());
     }
