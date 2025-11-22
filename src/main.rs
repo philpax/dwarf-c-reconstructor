@@ -13,6 +13,8 @@ struct TypeInfo {
     pointer_count: usize,
     array_sizes: Vec<usize>,
     is_const: bool,
+    is_volatile: bool,
+    is_restrict: bool,
     is_static: bool,
     is_extern: bool,
     // For function pointers
@@ -28,6 +30,8 @@ impl TypeInfo {
             pointer_count: 0,
             array_sizes: Vec::new(),
             is_const: false,
+            is_volatile: false,
+            is_restrict: false,
             is_static: false,
             is_extern: false,
             is_function_pointer: false,
@@ -84,9 +88,15 @@ impl TypeInfo {
                 result.push_str(")()");
             }
         } else {
-            // Add const qualifier before base type
+            // Add type qualifiers before base type
             if self.is_const {
                 result.push_str("const ");
+            }
+            if self.is_volatile {
+                result.push_str("volatile ");
+            }
+            if self.is_restrict {
+                result.push_str("restrict ");
             }
             result.push_str(&self.base_type);
             result.push(' ');
@@ -157,6 +167,17 @@ struct Function {
     high_pc: Option<u64>,
     is_inline: bool,
     is_external: bool,
+    is_virtual: bool,
+    is_constructor: bool,
+    is_destructor: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BaseClass {
+    type_name: String,
+    offset: Option<u64>,
+    accessibility: Option<String>,
+    is_virtual: bool,
 }
 
 #[derive(Debug)]
@@ -171,6 +192,8 @@ struct Compound {
     typedef_name: Option<String>,
     typedef_line: Option<u64>,
     byte_size: Option<u64>,
+    base_classes: Vec<BaseClass>,
+    is_virtual: bool,
 }
 
 #[derive(Debug)]
@@ -555,8 +578,13 @@ impl DwarfParser {
         let high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
+        let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, &mut entries)
+        // Detect constructors and destructors by name
+        let is_constructor = is_method && !name.starts_with('~');
+        let is_destructor = is_method && name.starts_with('~');
+
+        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, &mut entries)
     }
 
     fn parse_lexical_block_offset(
@@ -608,6 +636,8 @@ impl DwarfParser {
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let mut members = Vec::new();
         let mut methods = Vec::new();
+        let mut base_classes = Vec::new();
+        let mut is_virtual = false;
         let mut absolute_depth = 1;  // We start at the struct/union level (depth 1 from compile unit)
 
         // Parse members
@@ -630,6 +660,10 @@ impl DwarfParser {
                 match tag {
                     gimli::DW_TAG_member => {
                         if let Some(var) = self.parse_member(unit, child_entry)? {
+                            // Check if this is a vtable pointer
+                            if var.name.starts_with("_vptr") || var.name == "__vptr" {
+                                is_virtual = true;
+                            }
                             members.push(var);
                         }
                     }
@@ -637,6 +671,11 @@ impl DwarfParser {
                         // This is a method declaration
                         if let Some(func) = self.parse_function_at(unit, offset, true)? {
                             methods.push(func);
+                        }
+                    }
+                    gimli::DW_TAG_inheritance => {
+                        if let Some(base) = self.parse_inheritance(unit, child_entry)? {
+                            base_classes.push(base);
                         }
                     }
                     _ => {}
@@ -655,6 +694,8 @@ impl DwarfParser {
             typedef_name,
             typedef_line,
             byte_size,
+            base_classes,
+            is_virtual,
         }))
     }
 
@@ -725,6 +766,8 @@ impl DwarfParser {
             typedef_name,
             typedef_line,
             byte_size,
+            base_classes: Vec::new(),
+            is_virtual: false,
         }))
     }
 
@@ -749,6 +792,32 @@ impl DwarfParser {
             line,
             accessibility,
             offset,
+        }))
+    }
+
+    fn parse_inheritance(
+        &mut self,
+        unit: &DwarfUnit,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Result<Option<BaseClass>, Box<dyn std::error::Error>> {
+        // Get the type of the base class
+        let type_info = self.resolve_type(unit, entry)?;
+        let type_name = type_info.base_type;
+
+        // Get offset of the base class within the derived class
+        let offset = self.get_member_offset(unit, entry);
+
+        // Get accessibility (public, protected, private)
+        let accessibility = self.get_accessibility(entry);
+
+        // Check if it's virtual inheritance
+        let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
+
+        Ok(Some(BaseClass {
+            type_name,
+            offset,
+            accessibility,
+            is_virtual,
         }))
     }
 
@@ -805,8 +874,13 @@ impl DwarfParser {
         let high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
+        let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
 
-        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, entries)
+        // Detect constructors and destructors by name
+        let is_constructor = is_method && !name.starts_with('~');
+        let is_destructor = is_method && name.starts_with('~');
+
+        self.parse_function_children(unit, name, line, return_type, accessibility, has_body, is_method, low_pc, high_pc, is_inline, is_external, is_virtual, is_constructor, is_destructor, entries)
     }
 
     fn parse_function_children(
@@ -822,6 +896,9 @@ impl DwarfParser {
         high_pc: Option<u64>,
         is_inline: bool,
         is_external: bool,
+        is_virtual: bool,
+        is_constructor: bool,
+        is_destructor: bool,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
         let mut parameters = Vec::new();
@@ -896,6 +973,9 @@ impl DwarfParser {
             high_pc,
             is_inline,
             is_external,
+            is_virtual,
+            is_constructor,
+            is_destructor,
         }))
     }
 
@@ -1133,6 +1213,28 @@ impl DwarfParser {
                     Ok(type_info)
                 } else {
                     Ok(TypeInfo::new("const void".to_string()))
+                }
+            }
+            gimli::DW_TAG_volatile_type => {
+                if let Some(base_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
+                    let mut type_info = self.resolve_type_from_offset(unit, base_offset)?;
+                    type_info.is_volatile = true;
+                    Ok(type_info)
+                } else {
+                    let mut type_info = TypeInfo::new("void".to_string());
+                    type_info.is_volatile = true;
+                    Ok(type_info)
+                }
+            }
+            gimli::DW_TAG_restrict_type => {
+                if let Some(base_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
+                    let mut type_info = self.resolve_type_from_offset(unit, base_offset)?;
+                    type_info.is_restrict = true;
+                    Ok(type_info)
+                } else {
+                    let mut type_info = TypeInfo::new("void".to_string());
+                    type_info.is_restrict = true;
+                    Ok(type_info)
                 }
             }
             gimli::DW_TAG_typedef => {
@@ -1564,10 +1666,38 @@ impl CodeGenerator {
 
             if let Some(ref name) = compound.name {
                 opening.push_str(name);
-                opening.push(' ');
             }
 
-            opening.push('{');
+            // Add base classes if any (structs can have inheritance in C++)
+            if !compound.base_classes.is_empty() {
+                opening.push_str(" : ");
+                let bases: Vec<String> = compound.base_classes.iter().map(|base| {
+                    let mut base_str = String::new();
+
+                    // Add accessibility (defaults to public for structs)
+                    if let Some(ref access) = base.accessibility {
+                        base_str.push_str(access);
+                        base_str.push(' ');
+                    }
+
+                    // Add virtual keyword if virtual inheritance
+                    if base.is_virtual {
+                        base_str.push_str("virtual ");
+                    }
+
+                    base_str.push_str(&base.type_name);
+
+                    // Add offset comment if available
+                    if let Some(offset) = base.offset {
+                        base_str.push_str(&format!(" /* @ offset {} */", offset));
+                    }
+
+                    base_str
+                }).collect();
+                opening.push_str(&bases.join(", "));
+            }
+
+            opening.push_str(" {");
 
             if let Some(line) = compound.line {
                 opening.push_str(&format!(" //{}", line));
@@ -1605,6 +1735,36 @@ impl CodeGenerator {
 
     fn generate_class(&mut self, compound: &Compound) {
         let mut opening = format!("class {}", compound.name.as_ref().unwrap_or(&String::from("unnamed")));
+
+        // Add base classes if any
+        if !compound.base_classes.is_empty() {
+            opening.push_str(" : ");
+            let bases: Vec<String> = compound.base_classes.iter().map(|base| {
+                let mut base_str = String::new();
+
+                // Add accessibility (defaults to private for classes)
+                if let Some(ref access) = base.accessibility {
+                    base_str.push_str(access);
+                    base_str.push(' ');
+                }
+
+                // Add virtual keyword if virtual inheritance
+                if base.is_virtual {
+                    base_str.push_str("virtual ");
+                }
+
+                base_str.push_str(&base.type_name);
+
+                // Add offset comment if available
+                if let Some(offset) = base.offset {
+                    base_str.push_str(&format!(" /* @ offset {} */", offset));
+                }
+
+                base_str
+            }).collect();
+            opening.push_str(&bases.join(", "));
+        }
+
         opening.push_str(" {");
 
         if let Some(line) = compound.line {
@@ -1670,9 +1830,12 @@ impl CodeGenerator {
         }
 
         let mut closing = String::from("};");
-        // Add size comment
+        // Add size and vtable comments
         if let Some(size) = compound.byte_size {
             closing.push_str(&format!(" // sizeof: {}", size));
+        }
+        if compound.is_virtual {
+            closing.push_str(" [has vtable]");
         }
         self.write_line(&closing);
     }
@@ -1833,12 +1996,19 @@ impl CodeGenerator {
     fn generate_method_declaration(&self, func: &Function) -> String {
         let mut decl = String::new();
 
-        // Return type
-        decl.push_str(&func.return_type.base_type);
-        if func.return_type.pointer_count > 0 {
-            decl.push_str(&"*".repeat(func.return_type.pointer_count));
+        // Virtual keyword
+        if func.is_virtual {
+            decl.push_str("virtual ");
         }
-        decl.push(' ');
+
+        // Return type (skip for constructors/destructors)
+        if !func.is_constructor && !func.is_destructor {
+            decl.push_str(&func.return_type.base_type);
+            if func.return_type.pointer_count > 0 {
+                decl.push_str(&"*".repeat(func.return_type.pointer_count));
+            }
+            decl.push(' ');
+        }
 
         // Function name
         decl.push_str(&func.name);
