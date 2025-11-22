@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub struct CodeGenerator {
     output: String,
     indent_level: usize,
+    type_sizes: HashMap<String, u64>,
 }
 
 impl CodeGenerator {
@@ -14,6 +15,7 @@ impl CodeGenerator {
         CodeGenerator {
             output: String::new(),
             indent_level: 0,
+            type_sizes: HashMap::new(),
         }
     }
 
@@ -56,9 +58,16 @@ impl CodeGenerator {
                 s if s.starts_with("GL") => 4,
                 // For fpos_t and other common types
                 "fpos_t" => 4,
-                // For struct/class types, we can't easily determine size here
-                // This is a limitation - ideally we'd look up the byte_size from parsed types
-                _ => 4, // Conservative default guess
+                // For struct/class types, look up the byte_size from parsed types
+                _ => {
+                    // Try to look up the type size in our collected types
+                    if let Some(&size) = self.type_sizes.get(&type_info.base_type) {
+                        size
+                    } else {
+                        // Conservative default if type not found
+                        4
+                    }
+                }
             }
         };
 
@@ -83,7 +92,32 @@ impl CodeGenerator {
         decl
     }
 
+    fn collect_type_sizes(&mut self, elements: &[Element]) {
+        for element in elements {
+            match element {
+                Element::Compound(c) => {
+                    if let (Some(name), Some(size)) = (&c.name, c.byte_size) {
+                        // Store both with and without compound type prefix for lookup
+                        self.type_sizes.insert(name.clone(), size);
+                        self.type_sizes.insert(format!("{} {}", c.compound_type, name), size);
+                    }
+                    // Also handle typedefs
+                    if let (Some(typedef_name), Some(size)) = (&c.typedef_name, c.byte_size) {
+                        self.type_sizes.insert(typedef_name.clone(), size);
+                    }
+                }
+                Element::Namespace(ns) => {
+                    self.collect_type_sizes(&ns.children);
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn generate_compile_unit(&mut self, cu: &CompileUnit) {
+        // First, collect type sizes from all compounds
+        self.collect_type_sizes(&cu.elements);
+
         self.write_line_comment("", &cu.name);
         if let Some(ref producer) = cu.producer {
             self.write_line(&format!("// Compiler: {}", producer));
