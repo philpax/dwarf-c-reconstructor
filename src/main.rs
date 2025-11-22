@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// DWARF C reconstructor - generates C code from DWARF debugging information
+/// DWARF C reconstructor - generates C++ code from DWARF debugging information
 #[derive(ClapParser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
