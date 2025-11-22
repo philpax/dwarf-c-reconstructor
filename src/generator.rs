@@ -19,6 +19,14 @@ impl CodeGenerator {
         }
     }
 
+    pub fn with_type_sizes(type_sizes: HashMap<String, u64>) -> Self {
+        CodeGenerator {
+            output: String::new(),
+            indent_level: 0,
+            type_sizes,
+        }
+    }
+
     fn indent(&self) -> String {
         "    ".repeat(self.indent_level)
     }
@@ -46,18 +54,33 @@ impl CodeGenerator {
             // Calculate size based on base type
             match type_info.base_type.as_str() {
                 "char" | "unsigned char" | "signed char" | "bool" => 1,
-                "short" | "short int" | "unsigned short" | "signed short" => 2,
+                "short" | "short int" | "unsigned short" | "signed short" | "short unsigned int" => 2,
                 "int" | "unsigned int" | "signed int" => 4,
-                "long" | "unsigned long" | "signed long" => 4, // 32-bit long
-                "long long" | "unsigned long long" | "signed long long" => 8,
+                "long" | "unsigned long" | "signed long" | "long int" | "long unsigned int" => 4, // 32-bit long
+                "long long" | "unsigned long long" | "signed long long" | "long long int" | "long long unsigned int" => 8,
                 "float" => 4,
                 "double" => 8,
                 "long double" => 12, // x86 extended precision
                 "void" => 0,
                 // For GLuint, GLint and similar types (typically typedef to unsigned int / int)
                 s if s.starts_with("GL") => 4,
-                // For fpos_t and other common types
+                // Common system types (32-bit)
                 "fpos_t" => 4,
+                "time_t" => 4,
+                "size_t" => 4,
+                "ssize_t" => 4,
+                "off_t" => 4,
+                "pid_t" => 4,
+                "uid_t" => 4,
+                "gid_t" => 4,
+                "suseconds_t" => 4,
+                "clock_t" => 4,
+                "dev_t" => 4,
+                "ino_t" => 4,
+                "mode_t" => 4,
+                "nlink_t" => 4,
+                "blksize_t" => 4,
+                "blkcnt_t" => 4,
                 // For struct/class types, look up the byte_size from parsed types
                 _ => {
                     // Look up the type size in our collected types
@@ -89,22 +112,25 @@ impl CodeGenerator {
         decl
     }
 
-    fn collect_type_sizes(&mut self, elements: &[Element]) {
+    pub fn collect_type_sizes_from_elements(
+        type_sizes: &mut HashMap<String, u64>,
+        elements: &[Element],
+    ) {
         for element in elements {
             match element {
                 Element::Compound(c) => {
                     if let (Some(name), Some(size)) = (&c.name, c.byte_size) {
                         // Store both with and without compound type prefix for lookup
-                        self.type_sizes.insert(name.clone(), size);
-                        self.type_sizes.insert(format!("{} {}", c.compound_type, name), size);
+                        type_sizes.insert(name.clone(), size);
+                        type_sizes.insert(format!("{} {}", c.compound_type, name), size);
                     }
                     // Also handle typedefs
                     if let (Some(typedef_name), Some(size)) = (&c.typedef_name, c.byte_size) {
-                        self.type_sizes.insert(typedef_name.clone(), size);
+                        type_sizes.insert(typedef_name.clone(), size);
                     }
                 }
                 Element::Namespace(ns) => {
-                    self.collect_type_sizes(&ns.children);
+                    Self::collect_type_sizes_from_elements(type_sizes, &ns.children);
                 }
                 _ => {}
             }
@@ -112,9 +138,6 @@ impl CodeGenerator {
     }
 
     pub fn generate_compile_unit(&mut self, cu: &CompileUnit) {
-        // First, collect type sizes from all compounds
-        self.collect_type_sizes(&cu.elements);
-
         self.write_line_comment("", &cu.name);
         if let Some(ref producer) = cu.producer {
             self.write_line(&format!("// Compiler: {}", producer));
