@@ -1606,9 +1606,14 @@ impl DwarfParser {
     fn get_accessibility(&self, entry: &DebuggingInformationEntry<DwarfReader>) -> Option<String> {
         if let Some(attr_value) = entry.attr(gimli::DW_AT_accessibility).ok()? {
             match attr_value.value() {
-                AttributeValue::Udata(1) => return Some("public".to_string()),
-                AttributeValue::Udata(2) => return Some("protected".to_string()),
-                AttributeValue::Udata(3) => return Some("private".to_string()),
+                AttributeValue::Accessibility(access) => {
+                    match access {
+                        gimli::DwAccess(1) => return Some("public".to_string()),
+                        gimli::DwAccess(2) => return Some("protected".to_string()),
+                        gimli::DwAccess(3) => return Some("private".to_string()),
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }
