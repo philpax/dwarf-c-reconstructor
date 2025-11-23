@@ -68,53 +68,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     for cu in &compile_units {
-        let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
-        generator.generate_compile_unit(cu);
+        // Group elements by declaration file
+        let mut elements_by_file: HashMap<Option<u64>, Vec<&types::Element>> = HashMap::new();
 
-        // Determine output file path, preserving directory structure
-        let output_rel_path = if cu.name.is_empty() {
-            "unknown.c".to_string()
-        } else {
-            // Normalize and clean up the path
-            let path = Path::new(&cu.name);
+        for element in &cu.elements {
+            let decl_file = match element {
+                types::Element::Compound(c) => c.decl_file,
+                types::Element::Function(f) => f.decl_file,
+                types::Element::Variable(v) => v.decl_file,
+                types::Element::Namespace(_) => None, // Namespaces don't have decl_file
+            };
 
-            // Convert to a clean relative path, removing .. and . components
-            let mut components = Vec::new();
-            for component in path.components() {
-                match component {
-                    std::path::Component::Normal(c) => {
-                        components.push(c.to_str().unwrap_or("unknown"));
-                    }
-                    std::path::Component::ParentDir => {
-                        // Skip parent directory references for cleaner output
-                        if !components.is_empty() {
-                            components.pop();
-                        }
-                    }
-                    std::path::Component::CurDir => {
-                        // Skip current directory references
-                    }
-                    _ => {}
-                }
-            }
-
-            if components.is_empty() {
-                "unknown.c".to_string()
-            } else {
-                components.join("/")
-            }
-        };
-
-        let output_path = output_dir.join(&output_rel_path);
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            elements_by_file.entry(decl_file).or_default().push(element);
         }
 
-        fs::write(&output_path, generator.get_output())?;
-        println!("Generated: {}", output_path.display());
+        // Normalize the compile unit path
+        let cu_path_normalized = normalize_path(&cu.name);
+
+        // Generate header files for each file in the file table
+        for (file_idx, file_path) in cu.file_table.iter().enumerate() {
+            let file_index = (file_idx + 1) as u64; // File table is 1-indexed
+
+            if let Some(elements) = elements_by_file.get(&Some(file_index)) {
+                if !elements.is_empty() {
+                    let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
+
+                    // Generate header content
+                    generator.generate_header_comment(&cu.name, file_path);
+
+                    // Generate elements for this header
+                    generator.generate_elements(elements);
+
+                    // Determine output path for header file
+                    let header_path_normalized = normalize_path(file_path);
+                    let output_path = output_dir.join(&header_path_normalized);
+
+                    // Create parent directories if they don't exist
+                    if let Some(parent) = output_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+
+                    fs::write(&output_path, generator.get_output())?;
+                    println!("Generated: {} (from {})", output_path.display(), file_path);
+                }
+            }
+        }
+
+        // Generate main source file with elements that belong to this file or have no decl_file
+        let main_elements: Vec<&types::Element> = elements_by_file
+            .get(&None)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+            .to_vec();
+
+        if !main_elements.is_empty() || elements_by_file.is_empty() {
+            let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
+
+            // Generate the compile unit with only the elements that belong to it
+            if !main_elements.is_empty() {
+                generator.generate_source_file(&cu.name, cu.producer.as_deref(), &main_elements);
+            } else {
+                // If all elements went to headers, still generate an empty source file
+                generator.generate_compile_unit(cu);
+            }
+
+            let output_path = output_dir.join(&cu_path_normalized);
+
+            // Create parent directories if they don't exist
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            fs::write(&output_path, generator.get_output())?;
+            println!("Generated: {}", output_path.display());
+        }
     }
 
     Ok(())
+}
+
+/// Normalize a file path by removing .. and . components
+fn normalize_path(path: &str) -> String {
+    if path.is_empty() {
+        return "unknown.c".to_string();
+    }
+
+    let path_obj = Path::new(path);
+    let mut components = Vec::new();
+
+    for component in path_obj.components() {
+        match component {
+            std::path::Component::Normal(c) => {
+                components.push(c.to_str().unwrap_or("unknown"));
+            }
+            std::path::Component::ParentDir => {
+                if !components.is_empty() {
+                    components.pop();
+                }
+            }
+            std::path::Component::CurDir => {
+                // Skip
+            }
+            _ => {}
+        }
+    }
+
+    if components.is_empty() {
+        "unknown.c".to_string()
+    } else {
+        components.join("/")
+    }
 }
