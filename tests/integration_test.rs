@@ -168,3 +168,66 @@ public:
     let _ = fs::remove_file(test_obj);
     let _ = fs::remove_dir_all(output_dir);
 }
+
+#[test]
+fn test_archive_file() {
+    let sample_path = "samples/libjpeg_x86_64.a";
+    if !Path::new(sample_path).exists() {
+        eprintln!("Sample archive {} not found, skipping test", sample_path);
+        return;
+    }
+
+    let output_dir = "/tmp/test_archive_integration";
+    let _ = fs::remove_dir_all(output_dir);
+
+    let output = Command::new("cargo")
+        .args(["run", "--", sample_path, "-o", output_dir])
+        .output()
+        .expect("Failed to execute dwarf-c-reconstructor");
+
+    assert!(
+        output.status.success(),
+        "dwarf-c-reconstructor failed on archive:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify that files were generated from the archive
+    let generated_files: Vec<_> = fs::read_dir(output_dir)
+        .expect("Failed to read output directory")
+        .filter_map(|e| e.ok())
+        .collect();
+
+    assert!(
+        !generated_files.is_empty(),
+        "No files were generated from the archive"
+    );
+
+    // Verify that we have both C source files and headers
+    let mut has_c_files = false;
+    let mut has_h_files = false;
+
+    fn check_files(dir: &Path, has_c: &mut bool, has_h: &mut bool) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    check_files(&path, has_c, has_h);
+                } else if let Some(ext) = path.extension() {
+                    if ext == "c" {
+                        *has_c = true;
+                    } else if ext == "h" {
+                        *has_h = true;
+                    }
+                }
+            }
+        }
+    }
+
+    check_files(Path::new(output_dir), &mut has_c_files, &mut has_h_files);
+
+    assert!(has_c_files, "No C source files generated from archive");
+    assert!(has_h_files, "No header files generated from archive");
+
+    // Cleanup
+    let _ = fs::remove_dir_all(output_dir);
+}

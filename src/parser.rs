@@ -1,5 +1,6 @@
 //! DWARF parser implementation
 
+use crate::error::Result;
 use crate::types::*;
 use gimli::{AttributeValue, DebuggingInformationEntry, Dwarf, Reader};
 use object::{Object, ObjectSection, ObjectSymbol};
@@ -71,51 +72,101 @@ fn apply_relocations<'a>(
     Cow::Owned(data)
 }
 
-pub struct DwarfParser {
-    dwarf: Dwarf<DwarfReader>,
+pub struct DwarfParser<'a> {
+    dwarf: Dwarf<DwarfReader<'a>>,
     type_cache: HashMap<usize, TypeInfo>,
     typedef_map: HashMap<usize, (String, Option<u64>)>,
     abstract_origins: HashMap<usize, String>,
-    // Keep the section data alive
-    _section_data: Vec<Vec<u8>>,
+    // Keep the relocated section data alive in stable heap allocations
+    _section_data: Vec<Box<[u8]>>,
 }
 #[allow(dead_code)] // Some parser methods are called via offset-based parsing
 #[allow(clippy::too_many_arguments)] // Parser methods need many parameters from DWARF
 #[allow(clippy::while_let_loop)] // Some loops are clearer with explicit match
-impl DwarfParser {
-    pub fn new(file_data: &'static [u8]) -> Result<Self, Box<dyn std::error::Error>> {
+impl<'a> DwarfParser<'a> {
+    pub fn new(file_data: &'a [u8]) -> Result<Self> {
         let object = object::File::parse(file_data)?;
 
-        let load_section = |id: gimli::SectionId| -> Result<DwarfReader, gimli::Error> {
+        // Pre-load and relocate all sections, storing them in stable heap allocations
+        let mut section_data_map: HashMap<&str, Box<[u8]>> = HashMap::new();
+
+        let section_ids = [
+            gimli::SectionId::DebugAbbrev,
+            gimli::SectionId::DebugInfo,
+            gimli::SectionId::DebugLine,
+            gimli::SectionId::DebugStr,
+            gimli::SectionId::DebugStrOffsets,
+            gimli::SectionId::DebugTypes,
+            gimli::SectionId::DebugLoc,
+            gimli::SectionId::DebugLocLists,
+            gimli::SectionId::DebugRanges,
+            gimli::SectionId::DebugRngLists,
+            gimli::SectionId::DebugAddr,
+            gimli::SectionId::DebugLineStr,
+        ];
+
+        // Preload all sections that need relocation, storing in stable Box allocations
+        for &id in &section_ids {
             let section_data = object
                 .section_by_name(id.name())
                 .and_then(|section| section.data().ok())
                 .unwrap_or(&[]);
 
-            // Apply relocations if this is an object file
             let relocated_data = apply_relocations(&object, section_data, id.name());
+            if let Cow::Owned(data) = relocated_data {
+                section_data_map.insert(id.name(), data.into_boxed_slice());
+            }
+        }
 
-            // Convert to 'static lifetime by leaking
-            let static_data: &'static [u8] = match relocated_data {
-                Cow::Borrowed(data) => data,
-                Cow::Owned(data) => Box::leak(data.into_boxed_slice()),
+        // Now load sections with proper references
+        // Box ensures the data address is stable even when moved
+        let load_section =
+            |id: gimli::SectionId| -> std::result::Result<DwarfReader<'a>, gimli::Error> {
+                let section_data = object
+                    .section_by_name(id.name())
+                    .and_then(|section| section.data().ok())
+                    .unwrap_or(&[]);
+
+                let relocated_data = apply_relocations(&object, section_data, id.name());
+
+                let data_ref: &'a [u8] = match relocated_data {
+                    Cow::Borrowed(data) => data,
+                    Cow::Owned(_) => {
+                        // Use the pre-stored relocated data from the map
+                        // SAFETY: We're extending the lifetime of the reference from the Box to 'a.
+                        // This is safe because:
+                        // 1. section_data_map contains the relocated data in Box (stable address)
+                        // 2. The Box data will be moved into the DwarfParser struct
+                        // 3. The DwarfParser has lifetime 'a
+                        // 4. The references won't outlive the parser
+                        if let Some(boxed_data) = section_data_map.get(id.name()) {
+                            unsafe {
+                                std::slice::from_raw_parts(boxed_data.as_ptr(), boxed_data.len())
+                            }
+                        } else {
+                            &[]
+                        }
+                    }
+                };
+
+                Ok(gimli::EndianSlice::new(data_ref, gimli::LittleEndian))
             };
 
-            Ok(gimli::EndianSlice::new(static_data, gimli::LittleEndian))
-        };
-
         let dwarf = Dwarf::load(load_section)?;
+
+        // Convert HashMap values to Vec for storage
+        let section_data_storage: Vec<Box<[u8]>> = section_data_map.into_values().collect();
 
         Ok(DwarfParser {
             dwarf,
             type_cache: HashMap::new(),
             typedef_map: HashMap::new(),
             abstract_origins: HashMap::new(),
-            _section_data: Vec::new(),
+            _section_data: section_data_storage,
         })
     }
 
-    pub fn parse(&mut self) -> Result<Vec<CompileUnit>, Box<dyn std::error::Error>> {
+    pub fn parse(&mut self) -> Result<Vec<CompileUnit>> {
         let mut compile_units = Vec::new();
 
         // First pass: collect typedefs and abstract origins
@@ -129,7 +180,9 @@ impl DwarfParser {
         let mut units = self.dwarf.units();
         while let Some(header) = units.next()? {
             let unit = self.dwarf.unit(header)?;
-            if let Some(cu) = self.parse_compile_unit(&unit)? {
+            if let Some(mut cu) = self.parse_compile_unit(&unit)? {
+                // Third pass: match method declarations with definitions
+                Self::match_method_definitions(&mut cu.elements);
                 compile_units.push(cu);
             }
         }
@@ -137,7 +190,113 @@ impl DwarfParser {
         Ok(compile_units)
     }
 
-    fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<(), Box<dyn std::error::Error>> {
+    /// Match method declarations in classes with their definitions at top level
+    fn match_method_definitions(elements: &mut [Element]) {
+        use std::collections::HashMap;
+
+        type MethodDefinition = (
+            Vec<Parameter>,
+            Vec<Variable>,
+            Vec<LexicalBlock>,
+            Vec<InlinedSubroutine>,
+            Vec<Label>,
+            bool,
+            Option<u64>,
+            Option<u64>,
+        );
+
+        // Build a map of linkage names to cloned function data
+        let mut definitions: HashMap<String, MethodDefinition> = HashMap::new();
+
+        for element in elements.iter() {
+            if let Element::Function(func) = element {
+                if !func.is_method {
+                    if let Some(ref linkage_name) = func.linkage_name {
+                        definitions.insert(
+                            linkage_name.clone(),
+                            (
+                                func.parameters.clone(),
+                                func.variables.clone(),
+                                func.lexical_blocks.clone(),
+                                func.inlined_calls.clone(),
+                                func.labels.clone(),
+                                func.has_body,
+                                func.low_pc,
+                                func.high_pc,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Match methods with definitions
+        for element in elements.iter_mut() {
+            match element {
+                Element::Compound(compound) => {
+                    for method in &mut compound.methods {
+                        if let Some(ref linkage_name) = method.linkage_name {
+                            if let Some((
+                                params,
+                                vars,
+                                blocks,
+                                inlined,
+                                labels,
+                                has_body,
+                                low_pc,
+                                high_pc,
+                            )) = definitions.get(linkage_name)
+                            {
+                                // Found matching definition, copy parameters and body info
+                                method.parameters = params.clone();
+                                method.variables = vars.clone();
+                                method.lexical_blocks = blocks.clone();
+                                method.inlined_calls = inlined.clone();
+                                method.labels = labels.clone();
+                                method.has_body = *has_body;
+                                method.low_pc = *low_pc;
+                                method.high_pc = *high_pc;
+                            }
+                        }
+                    }
+                }
+                Element::Namespace(ns) => {
+                    Self::match_method_definitions(&mut ns.children);
+                }
+                _ => {}
+            }
+        }
+
+        // Mark top-level functions that are method definitions
+        let mut method_linkage_names: HashMap<String, String> = HashMap::new();
+        for element in elements.iter() {
+            if let Element::Compound(compound) = element {
+                if let Some(ref class_name) = compound.name {
+                    for method in &compound.methods {
+                        if let Some(ref linkage_name) = method.linkage_name {
+                            method_linkage_names.insert(linkage_name.clone(), class_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        for element in elements.iter_mut() {
+            if let Element::Function(func) = element {
+                if !func.is_method {
+                    if let Some(ref linkage_name) = func.linkage_name {
+                        if let Some(class_name) = method_linkage_names.get(linkage_name) {
+                            // Mark this function as a method and set its class name
+                            func.is_method = true;
+                            func.class_name = Some(class_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<()> {
         let mut entries = unit.entries();
 
         // Get unit base offset for converting to absolute offsets
@@ -175,10 +334,7 @@ impl DwarfParser {
         Ok(())
     }
 
-    fn parse_compile_unit(
-        &mut self,
-        unit: &DwarfUnit,
-    ) -> Result<Option<CompileUnit>, Box<dyn std::error::Error>> {
+    fn parse_compile_unit(&mut self, unit: &DwarfUnit) -> Result<Option<CompileUnit>> {
         let mut entries = unit.entries();
 
         if let Some((_, entry)) = entries.next_dfs()? {
@@ -211,7 +367,7 @@ impl DwarfParser {
         &self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<String>> {
         let mut file_table = Vec::new();
 
         // Try to get the line program from DW_AT_stmt_list
@@ -279,7 +435,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         elements: &mut Vec<Element>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let mut total_depth1 = 0;
         let mut captured = 0;
         let mut absolute_depth = 0; // Track absolute depth
@@ -369,7 +525,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<Namespace>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Namespace>> {
         // Create cursor at offset and parse
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
@@ -389,7 +545,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         compound_type: &str,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         self.parse_compound_offset(unit, offset, compound_type)
     }
 
@@ -397,7 +553,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         self.parse_enum_offset(unit, offset)
     }
 
@@ -406,7 +562,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         is_method: bool,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         self.parse_function_offset(unit, offset, is_method)
     }
 
@@ -414,7 +570,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         self.parse_lexical_block_offset(unit, offset)
     }
 
@@ -424,7 +580,7 @@ impl DwarfParser {
         name: String,
         line: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Namespace>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Namespace>> {
         let mut children = Vec::new();
         let mut absolute_depth = 1; // We start at the namespace level (depth 1 from compile unit)
 
@@ -478,7 +634,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         compound_type: &str,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -522,7 +678,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -566,7 +722,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         is_method: bool,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -636,7 +792,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -651,7 +807,7 @@ impl DwarfParser {
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         compound_type: &str,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
@@ -692,7 +848,7 @@ impl DwarfParser {
         compound_type: &str,
         decl_file: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut members = Vec::new();
         let mut methods = Vec::new();
         let mut base_classes = Vec::new();
@@ -766,7 +922,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
@@ -805,7 +961,7 @@ impl DwarfParser {
         typedef_line: Option<u64>,
         decl_file: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut enum_values = Vec::new();
         let mut absolute_depth = 1; // We start at the enum level (depth 1 from compile unit)
 
@@ -852,7 +1008,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Variable>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Variable>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -887,7 +1043,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<BaseClass>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<BaseClass>> {
         // Get the type of the base class
         let type_info = self.resolve_type(unit, entry)?;
         let type_name = type_info.base_type;
@@ -913,7 +1069,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Variable>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Variable>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -949,7 +1105,7 @@ impl DwarfParser {
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         is_method: bool,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1033,7 +1189,7 @@ impl DwarfParser {
         linkage_name: Option<String>,
         is_artificial: bool,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         let mut parameters = Vec::new();
         let mut variables = Vec::new();
         let mut lexical_blocks = Vec::new();
@@ -1119,7 +1275,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Parameter>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Parameter>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1140,7 +1296,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
 
         self.parse_lexical_block_children(unit, line, entries)
@@ -1151,7 +1307,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         line: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         let mut variables = Vec::new();
         let mut nested_blocks = Vec::new();
         let mut inlined_calls = Vec::new();
@@ -1213,7 +1369,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<InlinedSubroutine>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<InlinedSubroutine>> {
         // Try to get name from abstract origin
         let name = if let Some(origin_offset) =
             self.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin)
@@ -1247,7 +1403,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Label>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Label>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1262,7 +1418,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
+    ) -> Result<TypeInfo> {
         let type_offset = match self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
             Some(offset) => offset,
             None => return Ok(TypeInfo::new("void".to_string())),
@@ -1271,11 +1427,7 @@ impl DwarfParser {
         self.resolve_type_from_offset(unit, type_offset)
     }
 
-    fn resolve_type_from_offset(
-        &mut self,
-        unit: &DwarfUnit,
-        offset: usize,
-    ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
+    fn resolve_type_from_offset(&mut self, unit: &DwarfUnit, offset: usize) -> Result<TypeInfo> {
         // Convert unit-relative offset to absolute offset for caching
         let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
         let absolute_offset = unit_start + offset;
@@ -1302,7 +1454,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
+    ) -> Result<TypeInfo> {
         match entry.tag() {
             gimli::DW_TAG_base_type => {
                 let name = self

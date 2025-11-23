@@ -1,7 +1,7 @@
 //! Type definitions for DWARF C reconstructor
 
-pub type DwarfReader = gimli::EndianSlice<'static, gimli::LittleEndian>;
-pub type DwarfUnit = gimli::Unit<DwarfReader>;
+pub type DwarfReader<'a> = gimli::EndianSlice<'a, gimli::LittleEndian>;
+pub type DwarfUnit<'a> = gimli::Unit<DwarfReader<'a>>;
 
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
@@ -147,13 +147,13 @@ pub struct Parameter {
     pub line: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Label {
     pub name: String,
     pub line: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)] // line field may be used in future
 pub struct LexicalBlock {
     pub variables: Vec<Variable>,
@@ -163,7 +163,7 @@ pub struct LexicalBlock {
     pub line: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InlinedSubroutine {
     pub name: String,
     pub line: Option<u64>,

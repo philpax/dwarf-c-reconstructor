@@ -9,7 +9,7 @@ pub struct CodeGenConfig {
     #[allow(dead_code)]
     pub shorten_int_types: bool,
     pub no_function_addresses: bool,
-    pub no_zero_offsets: bool,
+    pub no_offsets: bool,
     pub no_function_prototypes: bool,
 }
 
@@ -556,9 +556,9 @@ impl CodeGenerator {
 
         for member in &compound.members {
             match member.accessibility.as_deref() {
-                Some("public") => public_members.push(member),
                 Some("protected") => protected_members.push(member),
-                _ => private_members.push(member),
+                Some("private") => private_members.push(member),
+                _ => public_members.push(member), // Default to public
             }
         }
 
@@ -568,9 +568,9 @@ impl CodeGenerator {
 
         for method in &compound.methods {
             match method.accessibility.as_deref() {
-                Some("public") => public_methods.push(method),
                 Some("protected") => protected_methods.push(method),
-                _ => private_methods.push(method),
+                Some("private") => private_methods.push(method),
+                _ => public_methods.push(method), // Default to public
             }
         }
 
@@ -673,8 +673,8 @@ impl CodeGenerator {
                 if let Some(line) = var.line {
                     decl.push_str(&format!(" //{}", line));
                 }
-                // Skip offset 0 if configured
-                if !self.config.no_zero_offsets || offset != 0 {
+                // Add offset comment unless disabled
+                if !self.config.no_offsets {
                     decl.push_str(&format!(" @ offset {}", offset));
                 }
 
@@ -983,7 +983,13 @@ impl CodeGenerator {
         }
         decl.push(' ');
 
-        // Function name
+        // Function name (with class prefix for method definitions)
+        if func.is_method {
+            if let Some(ref class_name) = func.class_name {
+                decl.push_str(class_name);
+                decl.push_str("::");
+            }
+        }
         decl.push_str(&func.name);
         decl.push('(');
 
@@ -1117,36 +1123,100 @@ impl CodeGenerator {
     }
 
     fn generate_function_body(&mut self, func: &Function) {
-        // Variables
-        self.generate_variables(&func.variables);
-
-        // Inlined calls
-        for inlined in &func.inlined_calls {
-            let line_comment = inlined
-                .line
-                .map(|l| format!(" //{}", l))
-                .unwrap_or_default();
-            self.write_line(&format!("{}();{}", inlined.name, line_comment));
+        // Collect all elements with their indices for stable sorting
+        enum BodyElement<'a> {
+            Variable(&'a Variable, usize),
+            InlinedCall(&'a InlinedSubroutine, usize),
+            Label(&'a Label, usize),
+            LexicalBlock(&'a LexicalBlock, usize),
         }
 
-        // Labels
-        for label in &func.labels {
-            let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-            self.write_line(&format!("{}:{}", label.name, line_comment));
+        let mut elements: Vec<BodyElement> = Vec::new();
+
+        for (idx, var) in func.variables.iter().enumerate() {
+            elements.push(BodyElement::Variable(var, idx));
+        }
+        for (idx, inlined) in func.inlined_calls.iter().enumerate() {
+            elements.push(BodyElement::InlinedCall(inlined, idx));
+        }
+        for (idx, label) in func.labels.iter().enumerate() {
+            elements.push(BodyElement::Label(label, idx));
+        }
+        for (idx, block) in func.lexical_blocks.iter().enumerate() {
+            elements.push(BodyElement::LexicalBlock(block, idx));
         }
 
-        // Lexical blocks
-        for block in &func.lexical_blocks {
-            self.generate_lexical_block(block);
+        // Sort by line number, then by original index for stable sort
+        elements.sort_by_key(|elem| match elem {
+            BodyElement::Variable(v, idx) => (v.line, *idx),
+            BodyElement::InlinedCall(i, idx) => (i.line, *idx),
+            BodyElement::Label(l, idx) => (l.line, *idx),
+            BodyElement::LexicalBlock(b, idx) => (b.line, *idx),
+        });
+
+        // Generate in sorted order, grouping variables by line
+        let mut variables_buffer: Vec<&Variable> = Vec::new();
+        let mut last_line: Option<u64> = None;
+
+        for element in elements {
+            match element {
+                BodyElement::Variable(var, _) => {
+                    // Buffer variables to group them by line
+                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty()
+                    {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    variables_buffer.push(var);
+                    last_line = var.line;
+                }
+                BodyElement::InlinedCall(inlined, _) => {
+                    // Flush any buffered variables first
+                    if !variables_buffer.is_empty() {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    let line_comment = inlined
+                        .line
+                        .map(|l| format!(" //{}", l))
+                        .unwrap_or_default();
+                    self.write_line(&format!("{}();{}", inlined.name, line_comment));
+                    last_line = inlined.line;
+                }
+                BodyElement::Label(label, _) => {
+                    // Flush any buffered variables first
+                    if !variables_buffer.is_empty() {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+                    self.write_line(&format!("{}:{}", label.name, line_comment));
+                    last_line = label.line;
+                }
+                BodyElement::LexicalBlock(block, _) => {
+                    // Flush any buffered variables first
+                    if !variables_buffer.is_empty() {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    self.generate_lexical_block(block);
+                    last_line = block.line;
+                }
+            }
+        }
+
+        // Flush any remaining buffered variables
+        if !variables_buffer.is_empty() {
+            self.generate_variables(&variables_buffer);
         }
     }
 
-    fn generate_variables(&mut self, variables: &[Variable]) {
+    fn generate_variables(&mut self, variables: &[&Variable]) {
         // Group by line number and type compatibility
         let mut lines: HashMap<u64, Vec<&Variable>> = HashMap::new();
         let mut no_line_vars = Vec::new();
 
-        for var in variables {
+        for &var in variables {
             if let Some(line) = var.line {
                 lines.entry(line).or_default().push(var);
             } else {
@@ -1241,27 +1311,91 @@ impl CodeGenerator {
         self.write_line("{");
         self.indent_level += 1;
 
-        // Variables
-        self.generate_variables(&block.variables);
-
-        // Inlined calls
-        for inlined in &block.inlined_calls {
-            let line_comment = inlined
-                .line
-                .map(|l| format!(" //{}", l))
-                .unwrap_or_default();
-            self.write_line(&format!("{}();{}", inlined.name, line_comment));
+        // Collect all elements with their indices for stable sorting
+        enum BlockElement<'a> {
+            Variable(&'a Variable, usize),
+            InlinedCall(&'a InlinedSubroutine, usize),
+            Label(&'a Label, usize),
+            NestedBlock(&'a LexicalBlock, usize),
         }
 
-        // Labels
-        for label in &block.labels {
-            let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-            self.write_line(&format!("{}:{}", label.name, line_comment));
+        let mut elements: Vec<BlockElement> = Vec::new();
+
+        for (idx, var) in block.variables.iter().enumerate() {
+            elements.push(BlockElement::Variable(var, idx));
+        }
+        for (idx, inlined) in block.inlined_calls.iter().enumerate() {
+            elements.push(BlockElement::InlinedCall(inlined, idx));
+        }
+        for (idx, label) in block.labels.iter().enumerate() {
+            elements.push(BlockElement::Label(label, idx));
+        }
+        for (idx, nested) in block.nested_blocks.iter().enumerate() {
+            elements.push(BlockElement::NestedBlock(nested, idx));
         }
 
-        // Nested blocks
-        for nested in &block.nested_blocks {
-            self.generate_lexical_block(nested);
+        // Sort by line number, then by original index for stable sort
+        elements.sort_by_key(|elem| match elem {
+            BlockElement::Variable(v, idx) => (v.line, *idx),
+            BlockElement::InlinedCall(i, idx) => (i.line, *idx),
+            BlockElement::Label(l, idx) => (l.line, *idx),
+            BlockElement::NestedBlock(b, idx) => (b.line, *idx),
+        });
+
+        // Generate in sorted order, grouping variables by line
+        let mut variables_buffer: Vec<&Variable> = Vec::new();
+        let mut last_line: Option<u64> = None;
+
+        for element in elements {
+            match element {
+                BlockElement::Variable(var, _) => {
+                    // Buffer variables to group them by line
+                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty()
+                    {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    variables_buffer.push(var);
+                    last_line = var.line;
+                }
+                BlockElement::InlinedCall(inlined, _) => {
+                    // Flush any buffered variables first
+                    if !variables_buffer.is_empty() {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    let line_comment = inlined
+                        .line
+                        .map(|l| format!(" //{}", l))
+                        .unwrap_or_default();
+                    self.write_line(&format!("{}();{}", inlined.name, line_comment));
+                    last_line = inlined.line;
+                }
+                BlockElement::Label(label, _) => {
+                    // Flush any buffered variables first
+                    if !variables_buffer.is_empty() {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+                    self.write_line(&format!("{}:{}", label.name, line_comment));
+                    last_line = label.line;
+                }
+                BlockElement::NestedBlock(nested, _) => {
+                    // Flush any buffered variables first
+                    if !variables_buffer.is_empty() {
+                        self.generate_variables(&variables_buffer);
+                        variables_buffer.clear();
+                    }
+                    self.generate_lexical_block(nested);
+                    last_line = nested.line;
+                }
+            }
+        }
+
+        // Flush any remaining buffered variables
+        if !variables_buffer.is_empty() {
+            self.generate_variables(&variables_buffer);
         }
 
         self.indent_level -= 1;

@@ -1,20 +1,62 @@
+mod error;
 mod generator;
 mod parser;
 mod types;
 
 use clap::Parser as ClapParser;
+use error::Result;
 use generator::{CodeGenConfig, CodeGenerator};
+use object::read::archive::ArchiveFile;
 use parser::DwarfParser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+/// Parse a single object file's DWARF data
+fn parse_object_file(data: &[u8]) -> Result<Vec<types::CompileUnit>> {
+    let mut parser = DwarfParser::new(data)?;
+    parser.parse()
+}
+
+/// Parse an archive file and process all object file members
+fn parse_archive(archive: ArchiveFile<'_>, archive_data: &[u8]) -> Result<Vec<types::CompileUnit>> {
+    let mut all_compile_units = Vec::new();
+
+    // Collect all member data into owned Vec<u8> to ensure proper lifetime
+    let mut member_data_storage: Vec<Vec<u8>> = Vec::new();
+
+    for member_result in archive.members() {
+        let member = member_result?;
+        let member_data = member.data(archive_data)?;
+
+        // Skip non-object files (like symbol tables)
+        if object::File::parse(member_data).is_ok() {
+            member_data_storage.push(member_data.to_vec());
+        }
+    }
+
+    // Now parse each member's DWARF data
+    for member_data in &member_data_storage {
+        match parse_object_file(member_data) {
+            Ok(mut compile_units) => {
+                all_compile_units.append(&mut compile_units);
+            }
+            Err(e) => {
+                // Some members might not have DWARF data, that's okay
+                eprintln!("Warning: Failed to parse archive member: {}", e);
+            }
+        }
+    }
+
+    Ok(all_compile_units)
+}
+
 /// DWARF C reconstructor - generates C++ code from DWARF debugging information
 #[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Path to the ELF file to analyze
-    #[arg(value_name = "ELF_FILE")]
+    /// Path to the ELF file or archive to analyze
+    #[arg(value_name = "FILE")]
     file_path: String,
 
     /// Output directory for generated files
@@ -29,25 +71,30 @@ struct Args {
     #[arg(long)]
     no_function_addresses: bool,
 
-    /// Remove offset 0 comments for struct members
+    /// Remove all offset comments for struct members
     #[arg(long)]
-    no_zero_offsets: bool,
+    no_offsets: bool,
 
     /// Remove function prototype comments
     #[arg(long)]
     no_function_prototypes: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Read file into static memory
+    // Read file data
     let file_data = fs::read(&args.file_path)?;
-    let static_data: &'static [u8] = Box::leak(file_data.into_boxed_slice());
+    let file_data_slice: &[u8] = &file_data;
 
-    // Parse DWARF
-    let mut parser = DwarfParser::new(static_data)?;
-    let compile_units = parser.parse()?;
+    // Try to parse as archive first, then fall back to regular object file
+    let compile_units = if let Ok(archive) = ArchiveFile::parse(file_data_slice) {
+        // It's an archive file - process each member
+        parse_archive(archive, file_data_slice)?
+    } else {
+        // It's a regular object file
+        parse_object_file(file_data_slice)?
+    };
 
     // Collect all type sizes from all compile units
     let mut type_sizes = HashMap::new();
@@ -63,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = CodeGenConfig {
         shorten_int_types: args.shorten_int_types,
         no_function_addresses: args.no_function_addresses,
-        no_zero_offsets: args.no_zero_offsets,
+        no_offsets: args.no_offsets,
         no_function_prototypes: args.no_function_prototypes,
     };
 
