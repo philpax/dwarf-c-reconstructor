@@ -131,6 +131,7 @@ pub struct Variable {
     pub bit_size: Option<u64>,
     pub bit_offset: Option<u64>,
     pub const_value: Option<ConstValue>,
+    pub decl_file: Option<u64>, // File index from DWARF file table
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +193,7 @@ pub struct Function {
     pub is_destructor: bool,
     pub linkage_name: Option<String>,
     pub is_artificial: bool,
+    pub decl_file: Option<u64>, // File index from DWARF file table
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +218,7 @@ pub struct Compound {
     pub byte_size: Option<u64>,
     pub base_classes: Vec<BaseClass>,
     pub is_virtual: bool,
+    pub decl_file: Option<u64>, // File index from DWARF file table
 }
 
 #[derive(Debug)]
@@ -238,4 +241,5 @@ pub struct CompileUnit {
     pub name: String,
     pub producer: Option<String>,
     pub elements: Vec<Element>,
+    pub file_table: Vec<String>, // DWARF file table (index 0 is the compile unit file)
 }
