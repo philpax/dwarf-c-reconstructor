@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 
 /// Parse a single object file's DWARF data
-fn parse_object_file(data: &'static [u8]) -> Result<Vec<types::CompileUnit>> {
+fn parse_object_file(data: &[u8]) -> Result<Vec<types::CompileUnit>> {
     let mut parser = DwarfParser::new(data)?;
     parser.parse()
 }
@@ -36,16 +36,8 @@ fn parse_archive(archive: ArchiveFile<'_>, archive_data: &[u8]) -> Result<Vec<ty
     }
 
     // Now parse each member's DWARF data
-    // SAFETY: We extend the lifetime to 'static here, but this is safe because:
-    // 1. member_data_storage lives for the entire duration of this function
-    // 2. We only use the references during parsing, within this function
-    // 3. The CompileUnit structs that are returned contain owned data (String, Vec, etc.)
-    //    and don't retain references to the original bytes
     for member_data in &member_data_storage {
-        let static_data: &'static [u8] =
-            unsafe { std::slice::from_raw_parts(member_data.as_ptr(), member_data.len()) };
-
-        match parse_object_file(static_data) {
+        match parse_object_file(member_data) {
             Ok(mut compile_units) => {
                 all_compile_units.append(&mut compile_units);
             }
@@ -100,10 +92,8 @@ fn main() -> Result<()> {
         // It's an archive file - process each member
         parse_archive(archive, file_data_slice)?
     } else {
-        // It's a regular object file - leak it since we need 'static lifetime
-        // This is acceptable as it's the main input file and lives for program duration
-        let static_data: &'static [u8] = Box::leak(file_data.into_boxed_slice());
-        parse_object_file(static_data)?
+        // It's a regular object file
+        parse_object_file(file_data_slice)?
     };
 
     // Collect all type sizes from all compile units

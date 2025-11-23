@@ -72,48 +72,97 @@ fn apply_relocations<'a>(
     Cow::Owned(data)
 }
 
-pub struct DwarfParser {
-    dwarf: Dwarf<DwarfReader>,
+pub struct DwarfParser<'a> {
+    dwarf: Dwarf<DwarfReader<'a>>,
     type_cache: HashMap<usize, TypeInfo>,
     typedef_map: HashMap<usize, (String, Option<u64>)>,
     abstract_origins: HashMap<usize, String>,
-    // Keep the section data alive
-    _section_data: Vec<Vec<u8>>,
+    // Keep the relocated section data alive in stable heap allocations
+    _section_data: Vec<Box<[u8]>>,
 }
 #[allow(dead_code)] // Some parser methods are called via offset-based parsing
 #[allow(clippy::too_many_arguments)] // Parser methods need many parameters from DWARF
 #[allow(clippy::while_let_loop)] // Some loops are clearer with explicit match
-impl DwarfParser {
-    pub fn new(file_data: &'static [u8]) -> Result<Self> {
+impl<'a> DwarfParser<'a> {
+    pub fn new(file_data: &'a [u8]) -> Result<Self> {
         let object = object::File::parse(file_data)?;
 
+        // Pre-load and relocate all sections, storing them in stable heap allocations
+        let mut section_data_map: HashMap<&str, Box<[u8]>> = HashMap::new();
+
+        let section_ids = [
+            gimli::SectionId::DebugAbbrev,
+            gimli::SectionId::DebugInfo,
+            gimli::SectionId::DebugLine,
+            gimli::SectionId::DebugStr,
+            gimli::SectionId::DebugStrOffsets,
+            gimli::SectionId::DebugTypes,
+            gimli::SectionId::DebugLoc,
+            gimli::SectionId::DebugLocLists,
+            gimli::SectionId::DebugRanges,
+            gimli::SectionId::DebugRngLists,
+            gimli::SectionId::DebugAddr,
+            gimli::SectionId::DebugLineStr,
+        ];
+
+        // Preload all sections that need relocation, storing in stable Box allocations
+        for &id in &section_ids {
+            let section_data = object
+                .section_by_name(id.name())
+                .and_then(|section| section.data().ok())
+                .unwrap_or(&[]);
+
+            let relocated_data = apply_relocations(&object, section_data, id.name());
+            if let Cow::Owned(data) = relocated_data {
+                section_data_map.insert(id.name(), data.into_boxed_slice());
+            }
+        }
+
+        // Now load sections with proper references
+        // Box ensures the data address is stable even when moved
         let load_section =
-            |id: gimli::SectionId| -> std::result::Result<DwarfReader, gimli::Error> {
+            |id: gimli::SectionId| -> std::result::Result<DwarfReader<'a>, gimli::Error> {
                 let section_data = object
                     .section_by_name(id.name())
                     .and_then(|section| section.data().ok())
                     .unwrap_or(&[]);
 
-                // Apply relocations if this is an object file
                 let relocated_data = apply_relocations(&object, section_data, id.name());
 
-                // Convert to 'static lifetime by leaking
-                let static_data: &'static [u8] = match relocated_data {
+                let data_ref: &'a [u8] = match relocated_data {
                     Cow::Borrowed(data) => data,
-                    Cow::Owned(data) => Box::leak(data.into_boxed_slice()),
+                    Cow::Owned(_) => {
+                        // Use the pre-stored relocated data from the map
+                        // SAFETY: We're extending the lifetime of the reference from the Box to 'a.
+                        // This is safe because:
+                        // 1. section_data_map contains the relocated data in Box (stable address)
+                        // 2. The Box data will be moved into the DwarfParser struct
+                        // 3. The DwarfParser has lifetime 'a
+                        // 4. The references won't outlive the parser
+                        if let Some(boxed_data) = section_data_map.get(id.name()) {
+                            unsafe {
+                                std::slice::from_raw_parts(boxed_data.as_ptr(), boxed_data.len())
+                            }
+                        } else {
+                            &[]
+                        }
+                    }
                 };
 
-                Ok(gimli::EndianSlice::new(static_data, gimli::LittleEndian))
+                Ok(gimli::EndianSlice::new(data_ref, gimli::LittleEndian))
             };
 
         let dwarf = Dwarf::load(load_section)?;
+
+        // Convert HashMap values to Vec for storage
+        let section_data_storage: Vec<Box<[u8]>> = section_data_map.into_values().collect();
 
         Ok(DwarfParser {
             dwarf,
             type_cache: HashMap::new(),
             typedef_map: HashMap::new(),
             abstract_origins: HashMap::new(),
-            _section_data: Vec::new(),
+            _section_data: section_data_storage,
         })
     }
 

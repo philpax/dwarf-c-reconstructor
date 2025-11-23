@@ -1,7 +1,7 @@
 //! Type definitions for DWARF C reconstructor
 
-pub type DwarfReader = gimli::EndianSlice<'static, gimli::LittleEndian>;
-pub type DwarfUnit = gimli::Unit<DwarfReader>;
+pub type DwarfReader<'a> = gimli::EndianSlice<'a, gimli::LittleEndian>;
+pub type DwarfUnit<'a> = gimli::Unit<DwarfReader<'a>>;
 
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
