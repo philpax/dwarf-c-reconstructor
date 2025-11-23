@@ -249,6 +249,47 @@ impl CodeGenerator {
         self.write_line_comment("", &cu.name);
     }
 
+    /// Generate a header file comment
+    pub fn generate_header_comment(&mut self, cu_name: &str, header_path: &str) {
+        self.write_line_comment("", header_path);
+        self.write_line(&format!("// Extracted from compile unit: {}", cu_name));
+        self.output.push('\n');
+    }
+
+    /// Generate a source file with specific elements
+    pub fn generate_source_file(&mut self, cu_name: &str, producer: Option<&str>, elements: &[&Element]) {
+        self.write_line_comment("", cu_name);
+        if let Some(prod) = producer {
+            self.write_line(&format!("// Compiler: {}", prod));
+        }
+        self.output.push('\n');
+
+        self.generate_elements(elements);
+
+        self.write_line_comment("", cu_name);
+    }
+
+    /// Generate elements (for header files or filtered source files)
+    pub fn generate_elements(&mut self, elements: &[&Element]) {
+        // Sort elements by line number (maintain DWARF order for same line)
+        let mut sorted_elements: Vec<(usize, &Element)> =
+            elements.iter().enumerate().map(|(idx, &elem)| (idx, elem)).collect();
+        sorted_elements.sort_by_key(|(idx, elem)| {
+            let line = match elem {
+                Element::Compound(c) => c.line,
+                Element::Function(f) => f.line,
+                Element::Variable(v) => v.line,
+                Element::Namespace(ns) => ns.line,
+            };
+            (line, *idx)
+        });
+
+        for (_, element) in sorted_elements {
+            self.generate_element(element);
+            self.output.push('\n');
+        }
+    }
+
     fn generate_element(&mut self, element: &Element) {
         match element {
             Element::Compound(c) => self.generate_compound(c),
