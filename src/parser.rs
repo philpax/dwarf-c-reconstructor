@@ -140,11 +140,22 @@ impl DwarfParser {
     }
 
     /// Match method declarations in classes with their definitions at top level
-    fn match_method_definitions(elements: &mut Vec<Element>) {
+    fn match_method_definitions(elements: &mut [Element]) {
         use std::collections::HashMap;
 
+        type MethodDefinition = (
+            Vec<Parameter>,
+            Vec<Variable>,
+            Vec<LexicalBlock>,
+            Vec<InlinedSubroutine>,
+            Vec<Label>,
+            bool,
+            Option<u64>,
+            Option<u64>,
+        );
+
         // Build a map of linkage names to cloned function data
-        let mut definitions: HashMap<String, (Vec<Parameter>, Vec<Variable>, Vec<LexicalBlock>, Vec<InlinedSubroutine>, Vec<Label>, bool, Option<u64>, Option<u64>)> = HashMap::new();
+        let mut definitions: HashMap<String, MethodDefinition> = HashMap::new();
 
         for element in elements.iter() {
             if let Element::Function(func) = element {
@@ -174,7 +185,17 @@ impl DwarfParser {
                 Element::Compound(compound) => {
                     for method in &mut compound.methods {
                         if let Some(ref linkage_name) = method.linkage_name {
-                            if let Some((params, vars, blocks, inlined, labels, has_body, low_pc, high_pc)) = definitions.get(linkage_name) {
+                            if let Some((
+                                params,
+                                vars,
+                                blocks,
+                                inlined,
+                                labels,
+                                has_body,
+                                low_pc,
+                                high_pc,
+                            )) = definitions.get(linkage_name)
+                            {
                                 // Found matching definition, copy parameters and body info
                                 method.parameters = params.clone();
                                 method.variables = vars.clone();

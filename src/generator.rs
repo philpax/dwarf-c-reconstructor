@@ -1162,7 +1162,8 @@ impl CodeGenerator {
             match element {
                 BodyElement::Variable(var, _) => {
                     // Buffer variables to group them by line
-                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty() {
+                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty()
+                    {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
@@ -1349,7 +1350,8 @@ impl CodeGenerator {
             match element {
                 BlockElement::Variable(var, _) => {
                     // Buffer variables to group them by line
-                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty() {
+                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty()
+                    {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
