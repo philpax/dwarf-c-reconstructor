@@ -1,5 +1,6 @@
 //! DWARF parser implementation
 
+use crate::error::Result;
 use crate::types::*;
 use gimli::{AttributeValue, DebuggingInformationEntry, Dwarf, Reader};
 use object::{Object, ObjectSection, ObjectSymbol};
@@ -83,26 +84,27 @@ pub struct DwarfParser {
 #[allow(clippy::too_many_arguments)] // Parser methods need many parameters from DWARF
 #[allow(clippy::while_let_loop)] // Some loops are clearer with explicit match
 impl DwarfParser {
-    pub fn new(file_data: &'static [u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(file_data: &'static [u8]) -> Result<Self> {
         let object = object::File::parse(file_data)?;
 
-        let load_section = |id: gimli::SectionId| -> Result<DwarfReader, gimli::Error> {
-            let section_data = object
-                .section_by_name(id.name())
-                .and_then(|section| section.data().ok())
-                .unwrap_or(&[]);
+        let load_section =
+            |id: gimli::SectionId| -> std::result::Result<DwarfReader, gimli::Error> {
+                let section_data = object
+                    .section_by_name(id.name())
+                    .and_then(|section| section.data().ok())
+                    .unwrap_or(&[]);
 
-            // Apply relocations if this is an object file
-            let relocated_data = apply_relocations(&object, section_data, id.name());
+                // Apply relocations if this is an object file
+                let relocated_data = apply_relocations(&object, section_data, id.name());
 
-            // Convert to 'static lifetime by leaking
-            let static_data: &'static [u8] = match relocated_data {
-                Cow::Borrowed(data) => data,
-                Cow::Owned(data) => Box::leak(data.into_boxed_slice()),
+                // Convert to 'static lifetime by leaking
+                let static_data: &'static [u8] = match relocated_data {
+                    Cow::Borrowed(data) => data,
+                    Cow::Owned(data) => Box::leak(data.into_boxed_slice()),
+                };
+
+                Ok(gimli::EndianSlice::new(static_data, gimli::LittleEndian))
             };
-
-            Ok(gimli::EndianSlice::new(static_data, gimli::LittleEndian))
-        };
 
         let dwarf = Dwarf::load(load_section)?;
 
@@ -115,7 +117,7 @@ impl DwarfParser {
         })
     }
 
-    pub fn parse(&mut self) -> Result<Vec<CompileUnit>, Box<dyn std::error::Error>> {
+    pub fn parse(&mut self) -> Result<Vec<CompileUnit>> {
         let mut compile_units = Vec::new();
 
         // First pass: collect typedefs and abstract origins
@@ -245,7 +247,7 @@ impl DwarfParser {
         }
     }
 
-    fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<(), Box<dyn std::error::Error>> {
+    fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<()> {
         let mut entries = unit.entries();
 
         // Get unit base offset for converting to absolute offsets
@@ -283,10 +285,7 @@ impl DwarfParser {
         Ok(())
     }
 
-    fn parse_compile_unit(
-        &mut self,
-        unit: &DwarfUnit,
-    ) -> Result<Option<CompileUnit>, Box<dyn std::error::Error>> {
+    fn parse_compile_unit(&mut self, unit: &DwarfUnit) -> Result<Option<CompileUnit>> {
         let mut entries = unit.entries();
 
         if let Some((_, entry)) = entries.next_dfs()? {
@@ -319,7 +318,7 @@ impl DwarfParser {
         &self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<String>> {
         let mut file_table = Vec::new();
 
         // Try to get the line program from DW_AT_stmt_list
@@ -387,7 +386,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         elements: &mut Vec<Element>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let mut total_depth1 = 0;
         let mut captured = 0;
         let mut absolute_depth = 0; // Track absolute depth
@@ -477,7 +476,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<Namespace>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Namespace>> {
         // Create cursor at offset and parse
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
@@ -497,7 +496,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         compound_type: &str,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         self.parse_compound_offset(unit, offset, compound_type)
     }
 
@@ -505,7 +504,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         self.parse_enum_offset(unit, offset)
     }
 
@@ -514,7 +513,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         is_method: bool,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         self.parse_function_offset(unit, offset, is_method)
     }
 
@@ -522,7 +521,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         self.parse_lexical_block_offset(unit, offset)
     }
 
@@ -532,7 +531,7 @@ impl DwarfParser {
         name: String,
         line: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Namespace>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Namespace>> {
         let mut children = Vec::new();
         let mut absolute_depth = 1; // We start at the namespace level (depth 1 from compile unit)
 
@@ -586,7 +585,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         compound_type: &str,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -630,7 +629,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -674,7 +673,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
         is_method: bool,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -744,7 +743,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         offset: gimli::UnitOffset,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
@@ -759,7 +758,7 @@ impl DwarfParser {
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         compound_type: &str,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
@@ -800,7 +799,7 @@ impl DwarfParser {
         compound_type: &str,
         decl_file: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut members = Vec::new();
         let mut methods = Vec::new();
         let mut base_classes = Vec::new();
@@ -874,7 +873,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
@@ -913,7 +912,7 @@ impl DwarfParser {
         typedef_line: Option<u64>,
         decl_file: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Compound>> {
         let mut enum_values = Vec::new();
         let mut absolute_depth = 1; // We start at the enum level (depth 1 from compile unit)
 
@@ -960,7 +959,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Variable>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Variable>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -995,7 +994,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<BaseClass>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<BaseClass>> {
         // Get the type of the base class
         let type_info = self.resolve_type(unit, entry)?;
         let type_name = type_info.base_type;
@@ -1021,7 +1020,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Variable>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Variable>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1057,7 +1056,7 @@ impl DwarfParser {
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         is_method: bool,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1141,7 +1140,7 @@ impl DwarfParser {
         linkage_name: Option<String>,
         is_artificial: bool,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<Function>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Function>> {
         let mut parameters = Vec::new();
         let mut variables = Vec::new();
         let mut lexical_blocks = Vec::new();
@@ -1227,7 +1226,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Parameter>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Parameter>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1248,7 +1247,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
 
         self.parse_lexical_block_children(unit, line, entries)
@@ -1259,7 +1258,7 @@ impl DwarfParser {
         unit: &DwarfUnit,
         line: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
-    ) -> Result<Option<LexicalBlock>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<LexicalBlock>> {
         let mut variables = Vec::new();
         let mut nested_blocks = Vec::new();
         let mut inlined_calls = Vec::new();
@@ -1321,7 +1320,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<InlinedSubroutine>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<InlinedSubroutine>> {
         // Try to get name from abstract origin
         let name = if let Some(origin_offset) =
             self.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin)
@@ -1355,7 +1354,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<Option<Label>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Label>> {
         let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
             Some(n) => n,
             None => return Ok(None),
@@ -1370,7 +1369,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
+    ) -> Result<TypeInfo> {
         let type_offset = match self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
             Some(offset) => offset,
             None => return Ok(TypeInfo::new("void".to_string())),
@@ -1379,11 +1378,7 @@ impl DwarfParser {
         self.resolve_type_from_offset(unit, type_offset)
     }
 
-    fn resolve_type_from_offset(
-        &mut self,
-        unit: &DwarfUnit,
-        offset: usize,
-    ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
+    fn resolve_type_from_offset(&mut self, unit: &DwarfUnit, offset: usize) -> Result<TypeInfo> {
         // Convert unit-relative offset to absolute offset for caching
         let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
         let absolute_offset = unit_start + offset;
@@ -1410,7 +1405,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
-    ) -> Result<TypeInfo, Box<dyn std::error::Error>> {
+    ) -> Result<TypeInfo> {
         match entry.tag() {
             gimli::DW_TAG_base_type => {
                 let name = self

@@ -1,8 +1,10 @@
+mod error;
 mod generator;
 mod parser;
 mod types;
 
 use clap::Parser as ClapParser;
+use error::Result;
 use generator::{CodeGenConfig, CodeGenerator};
 use object::read::archive::ArchiveFile;
 use parser::DwarfParser;
@@ -11,40 +13,45 @@ use std::fs;
 use std::path::Path;
 
 /// Parse a single object file's DWARF data
-fn parse_object_file(
-    data: &'static [u8],
-) -> Result<Vec<types::CompileUnit>, Box<dyn std::error::Error>> {
+fn parse_object_file(data: &'static [u8]) -> Result<Vec<types::CompileUnit>> {
     let mut parser = DwarfParser::new(data)?;
     parser.parse()
 }
 
 /// Parse an archive file and process all object file members
-fn parse_archive(
-    archive: ArchiveFile<'static>,
-    archive_data: &'static [u8],
-) -> Result<Vec<types::CompileUnit>, Box<dyn std::error::Error>> {
+fn parse_archive(archive: ArchiveFile<'_>, archive_data: &[u8]) -> Result<Vec<types::CompileUnit>> {
     let mut all_compile_units = Vec::new();
+
+    // Collect all member data into owned Vec<u8> to ensure proper lifetime
+    let mut member_data_storage: Vec<Vec<u8>> = Vec::new();
 
     for member_result in archive.members() {
         let member = member_result?;
         let member_data = member.data(archive_data)?;
 
         // Skip non-object files (like symbol tables)
-        if object::File::parse(member_data).is_err() {
-            continue;
+        if object::File::parse(member_data).is_ok() {
+            member_data_storage.push(member_data.to_vec());
         }
+    }
 
-        // Leak the member data to get 'static lifetime
-        let static_member_data: &'static [u8] = Box::leak(member_data.to_vec().into_boxed_slice());
+    // Now parse each member's DWARF data
+    // SAFETY: We extend the lifetime to 'static here, but this is safe because:
+    // 1. member_data_storage lives for the entire duration of this function
+    // 2. We only use the references during parsing, within this function
+    // 3. The CompileUnit structs that are returned contain owned data (String, Vec, etc.)
+    //    and don't retain references to the original bytes
+    for member_data in &member_data_storage {
+        let static_data: &'static [u8] =
+            unsafe { std::slice::from_raw_parts(member_data.as_ptr(), member_data.len()) };
 
-        // Parse this member's DWARF data
-        match parse_object_file(static_member_data) {
+        match parse_object_file(static_data) {
             Ok(mut compile_units) => {
                 all_compile_units.append(&mut compile_units);
             }
             Err(e) => {
                 // Some members might not have DWARF data, that's okay
-                eprintln!("Warning: Failed to parse member: {}", e);
+                eprintln!("Warning: Failed to parse archive member: {}", e);
             }
         }
     }
@@ -81,19 +88,21 @@ struct Args {
     no_function_prototypes: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Read file into static memory
+    // Read file data
     let file_data = fs::read(&args.file_path)?;
-    let static_data: &'static [u8] = Box::leak(file_data.into_boxed_slice());
+    let file_data_slice: &[u8] = &file_data;
 
     // Try to parse as archive first, then fall back to regular object file
-    let compile_units = if let Ok(archive) = ArchiveFile::parse(static_data) {
+    let compile_units = if let Ok(archive) = ArchiveFile::parse(file_data_slice) {
         // It's an archive file - process each member
-        parse_archive(archive, static_data)?
+        parse_archive(archive, file_data_slice)?
     } else {
-        // It's a regular object file
+        // It's a regular object file - leak it since we need 'static lifetime
+        // This is acceptable as it's the main input file and lives for program duration
+        let static_data: &'static [u8] = Box::leak(file_data.into_boxed_slice());
         parse_object_file(static_data)?
     };
 
