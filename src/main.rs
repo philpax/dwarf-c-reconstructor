@@ -97,7 +97,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(elements) = elements_by_file.get(&Some(file_index)) {
                 if !elements.is_empty() {
-                    let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
+                    let mut generator =
+                        CodeGenerator::with_config(type_sizes.clone(), config.clone());
 
                     // Generate header content
                     generator.generate_header_comment(&cu.name, file_path);
@@ -121,7 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Generate main source file with elements from the compile unit itself
         // Find the file index for the compile unit (if it exists in the file table)
-        let cu_file_index = cu.file_table
+        let cu_file_index = cu
+            .file_table
             .iter()
             .enumerate()
             .find(|(_, path)| normalize_path(path) == cu_path_normalized)

@@ -4,23 +4,13 @@ use crate::types::*;
 use cpp_demangle::Symbol;
 use std::collections::HashMap;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CodeGenConfig {
+    #[allow(dead_code)]
     pub shorten_int_types: bool,
     pub no_function_addresses: bool,
     pub no_zero_offsets: bool,
     pub no_function_prototypes: bool,
-}
-
-impl Default for CodeGenConfig {
-    fn default() -> Self {
-        CodeGenConfig {
-            shorten_int_types: false,
-            no_function_addresses: false,
-            no_zero_offsets: false,
-            no_function_prototypes: false,
-        }
-    }
 }
 
 pub struct CodeGenerator {
@@ -31,6 +21,7 @@ pub struct CodeGenerator {
 }
 
 impl CodeGenerator {
+    #[allow(dead_code)]
     pub fn with_type_sizes(type_sizes: HashMap<String, u64>) -> Self {
         CodeGenerator {
             output: String::new(),
@@ -53,6 +44,7 @@ impl CodeGenerator {
         "    ".repeat(self.indent_level)
     }
 
+    #[allow(dead_code)]
     fn shorten_type_name(&self, type_name: &str) -> String {
         if !self.config.shorten_int_types {
             return type_name.to_string();
@@ -73,6 +65,7 @@ impl CodeGenerator {
         }
     }
 
+    #[allow(dead_code)]
     fn format_type_string(&self, type_info: &TypeInfo, var_name: &str) -> String {
         if !self.config.shorten_int_types {
             return type_info.to_string(var_name);
@@ -155,9 +148,9 @@ impl CodeGenerator {
                 "INT16" | "UINT16" | "WORD" => 2,
                 "INT8" | "UINT8" | "BYTE" => 1,
                 "INT64" | "UINT64" | "QWORD" => 8,
-                "JCOEF" => 2, // JPEG coefficient (short)
+                "JCOEF" => 2,      // JPEG coefficient (short)
                 "JDIMENSION" => 4, // JPEG dimension (unsigned int)
-                "JOCTET" => 1, // JPEG octet (unsigned char)
+                "JOCTET" => 1,     // JPEG octet (unsigned char)
                 // For struct/class types, look up the byte_size from parsed types
                 _ => {
                     // Look up the type size in our collected types
@@ -229,8 +222,7 @@ impl CodeGenerator {
         self.output.push('\n');
 
         // Sort elements by line number (maintain DWARF order for same line)
-        let mut sorted_elements: Vec<(usize, &Element)> =
-            cu.elements.iter().enumerate().collect();
+        let mut sorted_elements: Vec<(usize, &Element)> = cu.elements.iter().enumerate().collect();
         sorted_elements.sort_by_key(|(idx, elem)| {
             let line = match elem {
                 Element::Compound(c) => c.line,
@@ -257,7 +249,12 @@ impl CodeGenerator {
     }
 
     /// Generate a source file with specific elements
-    pub fn generate_source_file(&mut self, cu_name: &str, producer: Option<&str>, elements: &[&Element]) {
+    pub fn generate_source_file(
+        &mut self,
+        cu_name: &str,
+        producer: Option<&str>,
+        elements: &[&Element],
+    ) {
         self.write_line_comment("", cu_name);
         if let Some(prod) = producer {
             self.write_line(&format!("// Compiler: {}", prod));
@@ -272,8 +269,11 @@ impl CodeGenerator {
     /// Generate elements (for header files or filtered source files)
     pub fn generate_elements(&mut self, elements: &[&Element]) {
         // Sort elements by line number (maintain DWARF order for same line)
-        let mut sorted_elements: Vec<(usize, &Element)> =
-            elements.iter().enumerate().map(|(idx, &elem)| (idx, elem)).collect();
+        let mut sorted_elements: Vec<(usize, &Element)> = elements
+            .iter()
+            .enumerate()
+            .map(|(idx, &elem)| (idx, elem))
+            .collect();
         sorted_elements.sort_by_key(|(idx, elem)| {
             let line = match elem {
                 Element::Compound(c) => c.line,
@@ -580,8 +580,11 @@ impl CodeGenerator {
             self.write_line("private:");
             self.generate_members(private_members.to_vec().as_slice());
             // Sort methods by line number
-            let mut sorted_methods: Vec<(usize, &Function)> =
-                private_methods.iter().enumerate().map(|(i, &f)| (i, f)).collect();
+            let mut sorted_methods: Vec<(usize, &Function)> = private_methods
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (i, f))
+                .collect();
             sorted_methods.sort_by_key(|(idx, m)| (m.line, *idx));
             for (_, method) in sorted_methods {
                 self.generate_method(method);
@@ -594,8 +597,11 @@ impl CodeGenerator {
             self.write_line("protected:");
             self.generate_members(protected_members.to_vec().as_slice());
             // Sort methods by line number
-            let mut sorted_methods: Vec<(usize, &Function)> =
-                protected_methods.iter().enumerate().map(|(i, &f)| (i, f)).collect();
+            let mut sorted_methods: Vec<(usize, &Function)> = protected_methods
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (i, f))
+                .collect();
             sorted_methods.sort_by_key(|(idx, m)| (m.line, *idx));
             for (_, method) in sorted_methods {
                 self.generate_method(method);
@@ -608,8 +614,11 @@ impl CodeGenerator {
             self.write_line("public:");
             self.generate_members(public_members.to_vec().as_slice());
             // Sort methods by line number
-            let mut sorted_methods: Vec<(usize, &Function)> =
-                public_methods.iter().enumerate().map(|(i, &f)| (i, f)).collect();
+            let mut sorted_methods: Vec<(usize, &Function)> = public_methods
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (i, f))
+                .collect();
             sorted_methods.sort_by_key(|(idx, m)| (m.line, *idx));
             for (_, method) in sorted_methods {
                 self.generate_method(method);

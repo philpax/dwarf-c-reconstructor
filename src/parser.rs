@@ -25,47 +25,47 @@ fn apply_relocations<'a>(
 
     // Get relocations from the DWARF section
     for (offset, relocation) in dwarf_section.relocations() {
-            let offset = offset as usize;
+        let offset = offset as usize;
 
-            // Get the value to add (from the symbol or addend)
-            let value: u64 = match relocation.target() {
-                RelocationTarget::Symbol(symbol_idx) => {
-                    if let Ok(symbol) = object_file.symbol_by_index(symbol_idx) {
-                        // For section symbols, use the section's address (0 for object files)
-                        // plus the addend
-                        if symbol.kind() == object::SymbolKind::Section {
-                            relocation.addend() as u64
-                        } else {
-                            symbol.address().wrapping_add(relocation.addend() as u64)
-                        }
-                    } else {
+        // Get the value to add (from the symbol or addend)
+        let value: u64 = match relocation.target() {
+            RelocationTarget::Symbol(symbol_idx) => {
+                if let Ok(symbol) = object_file.symbol_by_index(symbol_idx) {
+                    // For section symbols, use the section's address (0 for object files)
+                    // plus the addend
+                    if symbol.kind() == object::SymbolKind::Section {
                         relocation.addend() as u64
+                    } else {
+                        symbol.address().wrapping_add(relocation.addend() as u64)
                     }
-                }
-                _ => relocation.addend() as u64,
-            };
-
-            // Apply the relocation based on its type
-            use object::RelocationKind;
-            match relocation.kind() {
-                RelocationKind::Absolute if relocation.size() == 32 => {
-                    // R_X86_64_32: S + A (32-bit absolute)
-                    if offset + 4 <= data.len() {
-                        let bytes = (value as u32).to_le_bytes();
-                        data[offset..offset + 4].copy_from_slice(&bytes);
-                    }
-                }
-                RelocationKind::Absolute if relocation.size() == 64 => {
-                    // R_X86_64_64: S + A (64-bit absolute)
-                    if offset + 8 <= data.len() {
-                        let bytes = value.to_le_bytes();
-                        data[offset..offset + 8].copy_from_slice(&bytes);
-                    }
-                }
-                _ => {
-                    // Ignore other relocation types
+                } else {
+                    relocation.addend() as u64
                 }
             }
+            _ => relocation.addend() as u64,
+        };
+
+        // Apply the relocation based on its type
+        use object::RelocationKind;
+        match relocation.kind() {
+            RelocationKind::Absolute if relocation.size() == 32 => {
+                // R_X86_64_32: S + A (32-bit absolute)
+                if offset + 4 <= data.len() {
+                    let bytes = (value as u32).to_le_bytes();
+                    data[offset..offset + 4].copy_from_slice(&bytes);
+                }
+            }
+            RelocationKind::Absolute if relocation.size() == 64 => {
+                // R_X86_64_64: S + A (64-bit absolute)
+                if offset + 8 <= data.len() {
+                    let bytes = value.to_le_bytes();
+                    data[offset..offset + 8].copy_from_slice(&bytes);
+                }
+            }
+            _ => {
+                // Ignore other relocation types
+            }
+        }
     }
 
     Cow::Owned(data)
@@ -215,14 +215,17 @@ impl DwarfParser {
         let mut file_table = Vec::new();
 
         // Try to get the line program from DW_AT_stmt_list
-        if let Some(AttributeValue::DebugLineRef(line_offset)) =
-            entry.attr(gimli::DW_AT_stmt_list).ok().flatten().map(|a| a.value())
+        if let Some(AttributeValue::DebugLineRef(line_offset)) = entry
+            .attr(gimli::DW_AT_stmt_list)
+            .ok()
+            .flatten()
+            .map(|a| a.value())
         {
             if let Ok(program) = self.dwarf.debug_line.program(
                 line_offset,
                 unit.header.address_size(),
-                unit.comp_dir.clone(),
-                unit.name.clone(),
+                unit.comp_dir,
+                unit.name,
             ) {
                 let header = program.header();
 
@@ -249,7 +252,8 @@ impl DwarfParser {
                         }
 
                         // Get file name
-                        if let Ok(file_slice) = self.dwarf.attr_string(unit, file_entry.path_name()) {
+                        if let Ok(file_slice) = self.dwarf.attr_string(unit, file_entry.path_name())
+                        {
                             if let Ok(file_cow) = file_slice.to_slice() {
                                 let file_str = String::from_utf8_lossy(&file_cow);
                                 path_buf.push_str(&file_str);
@@ -1605,22 +1609,22 @@ impl DwarfParser {
 
     fn get_accessibility(&self, entry: &DebuggingInformationEntry<DwarfReader>) -> Option<String> {
         if let Some(attr_value) = entry.attr(gimli::DW_AT_accessibility).ok()? {
-            match attr_value.value() {
-                AttributeValue::Accessibility(access) => {
-                    match access {
-                        gimli::DwAccess(1) => return Some("public".to_string()),
-                        gimli::DwAccess(2) => return Some("protected".to_string()),
-                        gimli::DwAccess(3) => return Some("private".to_string()),
-                        _ => {}
-                    }
+            if let AttributeValue::Accessibility(access) = attr_value.value() {
+                match access {
+                    gimli::DwAccess(1) => return Some("public".to_string()),
+                    gimli::DwAccess(2) => return Some("protected".to_string()),
+                    gimli::DwAccess(3) => return Some("private".to_string()),
+                    _ => {}
                 }
-                _ => {}
             }
         }
         None
     }
 
-    fn get_const_value(&self, entry: &DebuggingInformationEntry<DwarfReader>) -> Option<ConstValue> {
+    fn get_const_value(
+        &self,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Option<ConstValue> {
         if let Some(attr_value) = entry.attr(gimli::DW_AT_const_value).ok()? {
             match attr_value.value() {
                 AttributeValue::Sdata(v) => return Some(ConstValue::Signed(v)),
