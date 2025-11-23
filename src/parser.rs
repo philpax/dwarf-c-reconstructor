@@ -61,15 +61,26 @@ impl DwarfParser {
     fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<(), Box<dyn std::error::Error>> {
         let mut entries = unit.entries();
 
+        // Get unit base offset for converting to absolute offsets
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+
         while let Some((_, entry)) = entries.next_dfs()? {
             let offset = entry.offset().0;
+            let abs_offset = unit_base + offset;
 
             // Collect typedefs
             if entry.tag() == gimli::DW_TAG_typedef {
                 if let Some(name) = self.get_string_attr(unit, entry, gimli::DW_AT_name) {
                     let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
                     if let Some(type_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
-                        self.typedef_map.insert(type_offset, (name, line));
+                        // Convert to absolute offset
+                        let abs_type_offset = unit_base + type_offset;
+                        self.typedef_map.insert(abs_type_offset, (name, line));
                     }
                 }
             }
@@ -77,7 +88,7 @@ impl DwarfParser {
             // Collect abstract origins (for inlined functions)
             if entry.tag() == gimli::DW_TAG_subprogram {
                 if let Some(name) = self.get_string_attr(unit, entry, gimli::DW_AT_name) {
-                    self.abstract_origins.insert(offset, name);
+                    self.abstract_origins.insert(abs_offset, name);
                 }
             }
         }
@@ -325,9 +336,18 @@ impl DwarfParser {
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
+        // Convert to absolute offset for typedef lookup
         let offset_val = entry.offset().0;
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+        let abs_offset = unit_base + offset_val;
+
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
+            if let Some((tname, tline)) = self.typedef_map.get(&abs_offset) {
                 (true, Some(tname.clone()), *tline)
             } else {
                 (false, None, None)
@@ -358,9 +378,18 @@ impl DwarfParser {
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
 
+        // Convert to absolute offset for typedef lookup
         let offset_val = entry.offset().0;
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+        let abs_offset = unit_base + offset_val;
+
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
+            if let Some((tname, tline)) = self.typedef_map.get(&abs_offset) {
                 (true, Some(tname.clone()), *tline)
             } else {
                 (false, None, None)
@@ -674,6 +703,8 @@ impl DwarfParser {
             .get_u64_attr(entry, gimli::DW_AT_bit_offset)
             .or_else(|| self.get_u64_attr(entry, gimli::DW_AT_data_bit_offset));
 
+        let const_value = self.get_const_value(entry);
+
         Ok(Some(Variable {
             name,
             type_info,
@@ -682,6 +713,7 @@ impl DwarfParser {
             offset,
             bit_size,
             bit_offset,
+            const_value,
         }))
     }
 
@@ -729,6 +761,8 @@ impl DwarfParser {
             type_info.is_extern = true;
         }
 
+        let const_value = self.get_const_value(entry);
+
         Ok(Some(Variable {
             name,
             type_info,
@@ -737,6 +771,7 @@ impl DwarfParser {
             offset: None,
             bit_size: None,
             bit_offset: None,
+            const_value,
         }))
     }
 
@@ -1011,7 +1046,15 @@ impl DwarfParser {
         let name = if let Some(origin_offset) =
             self.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin)
         {
-            self.abstract_origins.get(&origin_offset).cloned()
+            // Convert to absolute offset
+            let unit_base = unit
+                .header
+                .offset()
+                .as_debug_info_offset()
+                .map(|o| o.0)
+                .unwrap_or(0);
+            let abs_origin_offset = unit_base + origin_offset;
+            self.abstract_origins.get(&abs_origin_offset).cloned()
         } else {
             None
         };
@@ -1249,9 +1292,11 @@ impl DwarfParser {
                 // Get parameters
                 let mut entries = unit.entries_at_offset(entry.offset())?;
                 entries.next_dfs()?; // Skip the subroutine type itself
+                let mut absolute_depth = 0;
 
-                while let Some((depth, child_entry)) = entries.next_dfs()? {
-                    if depth == 0 {
+                while let Some((depth_delta, child_entry)) = entries.next_dfs()? {
+                    absolute_depth += depth_delta;
+                    if absolute_depth <= 0 {
                         break;
                     }
                     if child_entry.tag() == gimli::DW_TAG_formal_parameter {
@@ -1395,6 +1440,21 @@ impl DwarfParser {
                 AttributeValue::Udata(1) => return Some("public".to_string()),
                 AttributeValue::Udata(2) => return Some("protected".to_string()),
                 AttributeValue::Udata(3) => return Some("private".to_string()),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn get_const_value(&self, entry: &DebuggingInformationEntry<DwarfReader>) -> Option<ConstValue> {
+        if let Some(attr_value) = entry.attr(gimli::DW_AT_const_value).ok()? {
+            match attr_value.value() {
+                AttributeValue::Sdata(v) => return Some(ConstValue::Signed(v)),
+                AttributeValue::Udata(v) => return Some(ConstValue::Unsigned(v)),
+                AttributeValue::Data1(v) => return Some(ConstValue::Unsigned(v as u64)),
+                AttributeValue::Data2(v) => return Some(ConstValue::Unsigned(v as u64)),
+                AttributeValue::Data4(v) => return Some(ConstValue::Unsigned(v as u64)),
+                AttributeValue::Data8(v) => return Some(ConstValue::Unsigned(v)),
                 _ => {}
             }
         }

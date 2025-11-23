@@ -3,14 +3,14 @@ mod parser;
 mod types;
 
 use clap::Parser as ClapParser;
-use generator::CodeGenerator;
+use generator::{CodeGenConfig, CodeGenerator};
 use parser::DwarfParser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 /// DWARF C reconstructor - generates C++ code from DWARF debugging information
-#[derive(ClapParser, Debug)]
+#[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Path to the ELF file to analyze
@@ -20,6 +20,22 @@ struct Args {
     /// Output directory for generated files
     #[arg(short, long, default_value = "output")]
     output_dir: String,
+
+    /// Shorten integer type names (e.g., "short int" becomes "short")
+    #[arg(long)]
+    shorten_int_types: bool,
+
+    /// Remove function address comments
+    #[arg(long)]
+    no_function_addresses: bool,
+
+    /// Remove offset 0 comments for struct members
+    #[arg(long)]
+    no_zero_offsets: bool,
+
+    /// Remove function prototype comments
+    #[arg(long)]
+    no_function_prototypes: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,8 +59,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = Path::new(&args.output_dir);
     fs::create_dir_all(output_dir)?;
 
+    // Create config from command-line args
+    let config = CodeGenConfig {
+        shorten_int_types: args.shorten_int_types,
+        no_function_addresses: args.no_function_addresses,
+        no_zero_offsets: args.no_zero_offsets,
+        no_function_prototypes: args.no_function_prototypes,
+    };
+
     for cu in &compile_units {
-        let mut generator = CodeGenerator::with_type_sizes(type_sizes.clone());
+        let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
         generator.generate_compile_unit(cu);
 
         // Determine output file path, preserving directory structure

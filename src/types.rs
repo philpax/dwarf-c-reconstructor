@@ -130,6 +130,13 @@ pub struct Variable {
     pub offset: Option<u64>,
     pub bit_size: Option<u64>,
     pub bit_offset: Option<u64>,
+    pub const_value: Option<ConstValue>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConstValue {
+    Signed(i64),
+    Unsigned(u64),
 }
 
 #[derive(Debug, Clone)]
