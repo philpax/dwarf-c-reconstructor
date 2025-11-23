@@ -141,7 +141,7 @@ public:
     let generated_files: Vec<_> = fs::read_dir(output_dir)
         .expect("Failed to read output directory")
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "cpp"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "cpp"))
         .collect();
 
     if !generated_files.is_empty() {
