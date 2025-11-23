@@ -29,9 +29,9 @@ struct Args {
     #[arg(long)]
     no_function_addresses: bool,
 
-    /// Remove offset 0 comments for struct members
+    /// Remove all offset comments for struct members
     #[arg(long)]
-    no_zero_offsets: bool,
+    no_offsets: bool,
 
     /// Remove function prototype comments
     #[arg(long)]
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = CodeGenConfig {
         shorten_int_types: args.shorten_int_types,
         no_function_addresses: args.no_function_addresses,
-        no_zero_offsets: args.no_zero_offsets,
+        no_offsets: args.no_offsets,
         no_function_prototypes: args.no_function_prototypes,
     };
 

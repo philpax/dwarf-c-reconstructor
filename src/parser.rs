@@ -129,12 +129,99 @@ impl DwarfParser {
         let mut units = self.dwarf.units();
         while let Some(header) = units.next()? {
             let unit = self.dwarf.unit(header)?;
-            if let Some(cu) = self.parse_compile_unit(&unit)? {
+            if let Some(mut cu) = self.parse_compile_unit(&unit)? {
+                // Third pass: match method declarations with definitions
+                Self::match_method_definitions(&mut cu.elements);
                 compile_units.push(cu);
             }
         }
 
         Ok(compile_units)
+    }
+
+    /// Match method declarations in classes with their definitions at top level
+    fn match_method_definitions(elements: &mut Vec<Element>) {
+        use std::collections::HashMap;
+
+        // Build a map of linkage names to cloned function data
+        let mut definitions: HashMap<String, (Vec<Parameter>, Vec<Variable>, Vec<LexicalBlock>, Vec<InlinedSubroutine>, Vec<Label>, bool, Option<u64>, Option<u64>)> = HashMap::new();
+
+        for element in elements.iter() {
+            if let Element::Function(func) = element {
+                if !func.is_method {
+                    if let Some(ref linkage_name) = func.linkage_name {
+                        definitions.insert(
+                            linkage_name.clone(),
+                            (
+                                func.parameters.clone(),
+                                func.variables.clone(),
+                                func.lexical_blocks.clone(),
+                                func.inlined_calls.clone(),
+                                func.labels.clone(),
+                                func.has_body,
+                                func.low_pc,
+                                func.high_pc,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Match methods with definitions
+        for element in elements.iter_mut() {
+            match element {
+                Element::Compound(compound) => {
+                    for method in &mut compound.methods {
+                        if let Some(ref linkage_name) = method.linkage_name {
+                            if let Some((params, vars, blocks, inlined, labels, has_body, low_pc, high_pc)) = definitions.get(linkage_name) {
+                                // Found matching definition, copy parameters and body info
+                                method.parameters = params.clone();
+                                method.variables = vars.clone();
+                                method.lexical_blocks = blocks.clone();
+                                method.inlined_calls = inlined.clone();
+                                method.labels = labels.clone();
+                                method.has_body = *has_body;
+                                method.low_pc = *low_pc;
+                                method.high_pc = *high_pc;
+                            }
+                        }
+                    }
+                }
+                Element::Namespace(ns) => {
+                    Self::match_method_definitions(&mut ns.children);
+                }
+                _ => {}
+            }
+        }
+
+        // Mark top-level functions that are method definitions
+        let mut method_linkage_names: HashMap<String, String> = HashMap::new();
+        for element in elements.iter() {
+            if let Element::Compound(compound) = element {
+                if let Some(ref class_name) = compound.name {
+                    for method in &compound.methods {
+                        if let Some(ref linkage_name) = method.linkage_name {
+                            method_linkage_names.insert(linkage_name.clone(), class_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        for element in elements.iter_mut() {
+            if let Element::Function(func) = element {
+                if !func.is_method {
+                    if let Some(ref linkage_name) = func.linkage_name {
+                        if let Some(class_name) = method_linkage_names.get(linkage_name) {
+                            // Mark this function as a method and set its class name
+                            func.is_method = true;
+                            func.class_name = Some(class_name.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<(), Box<dyn std::error::Error>> {
