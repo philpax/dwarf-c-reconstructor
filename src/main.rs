@@ -4,17 +4,60 @@ mod types;
 
 use clap::Parser as ClapParser;
 use generator::{CodeGenConfig, CodeGenerator};
+use object::read::archive::ArchiveFile;
 use parser::DwarfParser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+/// Parse a single object file's DWARF data
+fn parse_object_file(
+    data: &'static [u8],
+) -> Result<Vec<types::CompileUnit>, Box<dyn std::error::Error>> {
+    let mut parser = DwarfParser::new(data)?;
+    parser.parse()
+}
+
+/// Parse an archive file and process all object file members
+fn parse_archive(
+    archive: ArchiveFile<'static>,
+    archive_data: &'static [u8],
+) -> Result<Vec<types::CompileUnit>, Box<dyn std::error::Error>> {
+    let mut all_compile_units = Vec::new();
+
+    for member_result in archive.members() {
+        let member = member_result?;
+        let member_data = member.data(archive_data)?;
+
+        // Skip non-object files (like symbol tables)
+        if object::File::parse(member_data).is_err() {
+            continue;
+        }
+
+        // Leak the member data to get 'static lifetime
+        let static_member_data: &'static [u8] = Box::leak(member_data.to_vec().into_boxed_slice());
+
+        // Parse this member's DWARF data
+        match parse_object_file(static_member_data) {
+            Ok(mut compile_units) => {
+                all_compile_units.append(&mut compile_units);
+            }
+            Err(e) => {
+                // Some members might not have DWARF data, that's okay
+                eprintln!("Warning: Failed to parse member: {}", e);
+            }
+        }
+    }
+
+    Ok(all_compile_units)
+}
+
 /// DWARF C reconstructor - generates C++ code from DWARF debugging information
 #[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Path to the ELF file to analyze
-    #[arg(value_name = "ELF_FILE")]
+    /// Path to the ELF file or archive to analyze
+    #[arg(value_name = "FILE")]
     file_path: String,
 
     /// Output directory for generated files
@@ -45,9 +88,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_data = fs::read(&args.file_path)?;
     let static_data: &'static [u8] = Box::leak(file_data.into_boxed_slice());
 
-    // Parse DWARF
-    let mut parser = DwarfParser::new(static_data)?;
-    let compile_units = parser.parse()?;
+    // Try to parse as archive first, then fall back to regular object file
+    let compile_units = if let Ok(archive) = ArchiveFile::parse(static_data) {
+        // It's an archive file - process each member
+        parse_archive(archive, static_data)?
+    } else {
+        // It's a regular object file
+        parse_object_file(static_data)?
+    };
 
     // Collect all type sizes from all compile units
     let mut type_sizes = HashMap::new();
