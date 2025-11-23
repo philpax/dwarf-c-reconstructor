@@ -1522,6 +1522,7 @@ impl DwarfParser {
                 AttributeValue::Data4(v) => return Some(v as u64),
                 AttributeValue::Data8(v) => return Some(v),
                 AttributeValue::Addr(v) => return Some(v),
+                AttributeValue::FileIndex(v) => return Some(v),
                 _ => {}
             }
         }
