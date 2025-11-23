@@ -89,6 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (file_idx, file_path) in cu.file_table.iter().enumerate() {
             let file_index = (file_idx + 1) as u64; // File table is 1-indexed
 
+            // Skip the compile unit's own file - it will be generated later
+            let header_path_normalized = normalize_path(file_path);
+            if header_path_normalized == cu_path_normalized {
+                continue;
+            }
+
             if let Some(elements) = elements_by_file.get(&Some(file_index)) {
                 if !elements.is_empty() {
                     let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
@@ -100,7 +106,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     generator.generate_elements(elements);
 
                     // Determine output path for header file
-                    let header_path_normalized = normalize_path(file_path);
                     let output_path = output_dir.join(&header_path_normalized);
 
                     // Create parent directories if they don't exist
@@ -114,12 +119,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Generate main source file with elements that belong to this file or have no decl_file
-        let main_elements: Vec<&types::Element> = elements_by_file
-            .get(&None)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-            .to_vec();
+        // Generate main source file with elements from the compile unit itself
+        // Find the file index for the compile unit (if it exists in the file table)
+        let cu_file_index = cu.file_table
+            .iter()
+            .enumerate()
+            .find(|(_, path)| normalize_path(path) == cu_path_normalized)
+            .map(|(idx, _)| (idx + 1) as u64);
+
+        // Collect elements: those with no decl_file + those declared in the CU file itself
+        let mut main_elements: Vec<&types::Element> = Vec::new();
+
+        // Add elements without decl_file
+        if let Some(elems) = elements_by_file.get(&None) {
+            main_elements.extend(elems.iter().copied());
+        }
+
+        // Add elements declared in the compile unit's own file
+        if let Some(cu_idx) = cu_file_index {
+            if let Some(elems) = elements_by_file.get(&Some(cu_idx)) {
+                main_elements.extend(elems.iter().copied());
+            }
+        }
 
         if !main_elements.is_empty() || elements_by_file.is_empty() {
             let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
