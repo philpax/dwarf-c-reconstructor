@@ -2,14 +2,82 @@
 
 use crate::types::*;
 use gimli::{AttributeValue, DebuggingInformationEntry, Dwarf, Reader};
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+/// Apply relocations to a DWARF section
+fn apply_relocations<'a>(
+    object_file: &object::File,
+    section_data: &'a [u8],
+    section_name: &str,
+) -> Cow<'a, [u8]> {
+    use object::RelocationTarget;
+
+    // Get the DWARF section to access its relocations
+    let dwarf_section = match object_file.section_by_name(section_name) {
+        Some(section) => section,
+        None => return Cow::Borrowed(section_data),
+    };
+
+    // Clone the section data so we can modify it
+    let mut data = section_data.to_vec();
+
+    // Get relocations from the DWARF section
+    for (offset, relocation) in dwarf_section.relocations() {
+        let offset = offset as usize;
+
+        // Get the value to add (from the symbol or addend)
+        let value: u64 = match relocation.target() {
+            RelocationTarget::Symbol(symbol_idx) => {
+                if let Ok(symbol) = object_file.symbol_by_index(symbol_idx) {
+                    // For section symbols, use the section's address (0 for object files)
+                    // plus the addend
+                    if symbol.kind() == object::SymbolKind::Section {
+                        relocation.addend() as u64
+                    } else {
+                        symbol.address().wrapping_add(relocation.addend() as u64)
+                    }
+                } else {
+                    relocation.addend() as u64
+                }
+            }
+            _ => relocation.addend() as u64,
+        };
+
+        // Apply the relocation based on its type
+        use object::RelocationKind;
+        match relocation.kind() {
+            RelocationKind::Absolute if relocation.size() == 32 => {
+                // R_X86_64_32: S + A (32-bit absolute)
+                if offset + 4 <= data.len() {
+                    let bytes = (value as u32).to_le_bytes();
+                    data[offset..offset + 4].copy_from_slice(&bytes);
+                }
+            }
+            RelocationKind::Absolute if relocation.size() == 64 => {
+                // R_X86_64_64: S + A (64-bit absolute)
+                if offset + 8 <= data.len() {
+                    let bytes = value.to_le_bytes();
+                    data[offset..offset + 8].copy_from_slice(&bytes);
+                }
+            }
+            _ => {
+                // Ignore other relocation types
+            }
+        }
+    }
+
+    Cow::Owned(data)
+}
 
 pub struct DwarfParser {
     dwarf: Dwarf<DwarfReader>,
     type_cache: HashMap<usize, TypeInfo>,
     typedef_map: HashMap<usize, (String, Option<u64>)>,
     abstract_origins: HashMap<usize, String>,
+    // Keep the section data alive
+    _section_data: Vec<Vec<u8>>,
 }
 #[allow(dead_code)] // Some parser methods are called via offset-based parsing
 #[allow(clippy::too_many_arguments)] // Parser methods need many parameters from DWARF
@@ -19,11 +87,21 @@ impl DwarfParser {
         let object = object::File::parse(file_data)?;
 
         let load_section = |id: gimli::SectionId| -> Result<DwarfReader, gimli::Error> {
-            let data = object
+            let section_data = object
                 .section_by_name(id.name())
                 .and_then(|section| section.data().ok())
                 .unwrap_or(&[]);
-            Ok(gimli::EndianSlice::new(data, gimli::LittleEndian))
+
+            // Apply relocations if this is an object file
+            let relocated_data = apply_relocations(&object, section_data, id.name());
+
+            // Convert to 'static lifetime by leaking
+            let static_data: &'static [u8] = match relocated_data {
+                Cow::Borrowed(data) => data,
+                Cow::Owned(data) => Box::leak(data.into_boxed_slice()),
+            };
+
+            Ok(gimli::EndianSlice::new(static_data, gimli::LittleEndian))
         };
 
         let dwarf = Dwarf::load(load_section)?;
@@ -33,6 +111,7 @@ impl DwarfParser {
             type_cache: HashMap::new(),
             typedef_map: HashMap::new(),
             abstract_origins: HashMap::new(),
+            _section_data: Vec::new(),
         })
     }
 
@@ -61,15 +140,26 @@ impl DwarfParser {
     fn collect_metadata(&mut self, unit: &DwarfUnit) -> Result<(), Box<dyn std::error::Error>> {
         let mut entries = unit.entries();
 
+        // Get unit base offset for converting to absolute offsets
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+
         while let Some((_, entry)) = entries.next_dfs()? {
             let offset = entry.offset().0;
+            let abs_offset = unit_base + offset;
 
             // Collect typedefs
             if entry.tag() == gimli::DW_TAG_typedef {
                 if let Some(name) = self.get_string_attr(unit, entry, gimli::DW_AT_name) {
                     let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
                     if let Some(type_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
-                        self.typedef_map.insert(type_offset, (name, line));
+                        // Convert to absolute offset
+                        let abs_type_offset = unit_base + type_offset;
+                        self.typedef_map.insert(abs_type_offset, (name, line));
                     }
                 }
             }
@@ -77,7 +167,7 @@ impl DwarfParser {
             // Collect abstract origins (for inlined functions)
             if entry.tag() == gimli::DW_TAG_subprogram {
                 if let Some(name) = self.get_string_attr(unit, entry, gimli::DW_AT_name) {
-                    self.abstract_origins.insert(offset, name);
+                    self.abstract_origins.insert(abs_offset, name);
                 }
             }
         }
@@ -98,6 +188,9 @@ impl DwarfParser {
                     .unwrap_or_else(|| "unknown".to_string());
                 let producer = self.get_string_attr(unit, entry, gimli::DW_AT_producer);
 
+                // Extract file table from line program
+                let file_table = self.extract_file_table(unit, entry)?;
+
                 let mut elements = Vec::new();
                 self.parse_children(unit, &mut entries, &mut elements)?;
 
@@ -105,11 +198,79 @@ impl DwarfParser {
                     name,
                     producer,
                     elements,
+                    file_table,
                 }));
             }
         }
 
         Ok(None)
+    }
+
+    /// Extract the file table from the DWARF line program
+    fn extract_file_table(
+        &self,
+        unit: &DwarfUnit,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let mut file_table = Vec::new();
+
+        // Try to get the line program from DW_AT_stmt_list
+        if let Some(AttributeValue::DebugLineRef(line_offset)) = entry
+            .attr(gimli::DW_AT_stmt_list)
+            .ok()
+            .flatten()
+            .map(|a| a.value())
+        {
+            if let Ok(program) = self.dwarf.debug_line.program(
+                line_offset,
+                unit.header.address_size(),
+                unit.comp_dir,
+                unit.name,
+            ) {
+                let header = program.header();
+
+                // File index 0 is defined to be the compile unit file (name from DW_AT_name)
+                // but it's not always in the file table, so we don't add it here
+
+                // Iterate through files in the file table (starting from index 1)
+                for file_index in 1.. {
+                    if let Some(file_entry) = header.file(file_index) {
+                        // Get the file name
+                        let mut path_buf = String::new();
+
+                        // Get directory if present
+                        if let Some(dir_attr) = file_entry.directory(header) {
+                            if let Ok(dir_slice) = self.dwarf.attr_string(unit, dir_attr) {
+                                if let Ok(dir_cow) = dir_slice.to_slice() {
+                                    let dir_str = String::from_utf8_lossy(&dir_cow);
+                                    if !dir_str.is_empty() {
+                                        path_buf.push_str(&dir_str);
+                                        path_buf.push('/');
+                                    }
+                                }
+                            }
+                        }
+
+                        // Get file name
+                        if let Ok(file_slice) = self.dwarf.attr_string(unit, file_entry.path_name())
+                        {
+                            if let Ok(file_cow) = file_slice.to_slice() {
+                                let file_str = String::from_utf8_lossy(&file_cow);
+                                path_buf.push_str(&file_str);
+                            }
+                        }
+
+                        if !path_buf.is_empty() {
+                            file_table.push(path_buf);
+                        }
+                    } else {
+                        break; // No more files
+                    }
+                }
+            }
+        }
+
+        Ok(file_table)
     }
 
     #[allow(unused_variables)] // Statistics tracking variables for debugging
@@ -324,10 +485,20 @@ impl DwarfParser {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
+        // Convert to absolute offset for typedef lookup
         let offset_val = entry.offset().0;
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+        let abs_offset = unit_base + offset_val;
+
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
+            if let Some((tname, tline)) = self.typedef_map.get(&abs_offset) {
                 (true, Some(tname.clone()), *tline)
             } else {
                 (false, None, None)
@@ -342,6 +513,7 @@ impl DwarfParser {
             typedef_name,
             typedef_line,
             compound_type,
+            decl_file,
             &mut entries,
         )
     }
@@ -357,10 +529,20 @@ impl DwarfParser {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
+        // Convert to absolute offset for typedef lookup
         let offset_val = entry.offset().0;
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+        let abs_offset = unit_base + offset_val;
+
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&offset_val) {
+            if let Some((tname, tline)) = self.typedef_map.get(&abs_offset) {
                 (true, Some(tname.clone()), *tline)
             } else {
                 (false, None, None)
@@ -374,6 +556,7 @@ impl DwarfParser {
             is_typedef,
             typedef_name,
             typedef_line,
+            decl_file,
             &mut entries,
         )
     }
@@ -420,6 +603,7 @@ impl DwarfParser {
             .get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
             .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
         let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Destructor detection by name (~ prefix)
         let is_destructor = is_method && name.starts_with('~');
@@ -429,6 +613,7 @@ impl DwarfParser {
         self.parse_function_children(
             unit,
             name,
+            decl_file,
             line,
             return_type,
             accessibility,
@@ -470,6 +655,7 @@ impl DwarfParser {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Check if typedef
         let offset = entry.offset().0;
@@ -489,6 +675,7 @@ impl DwarfParser {
             typedef_name,
             typedef_line,
             compound_type,
+            decl_file,
             entries,
         )
     }
@@ -503,6 +690,7 @@ impl DwarfParser {
         typedef_name: Option<String>,
         typedef_line: Option<u64>,
         compound_type: &str,
+        decl_file: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let mut members = Vec::new();
@@ -569,6 +757,7 @@ impl DwarfParser {
             byte_size,
             base_classes,
             is_virtual,
+            decl_file,
         }))
     }
 
@@ -581,6 +770,7 @@ impl DwarfParser {
         let name = self.get_string_attr(unit, entry, gimli::DW_AT_name);
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Check if typedef
         let offset = entry.offset().0;
@@ -599,6 +789,7 @@ impl DwarfParser {
             is_typedef,
             typedef_name,
             typedef_line,
+            decl_file,
             entries,
         )
     }
@@ -612,6 +803,7 @@ impl DwarfParser {
         is_typedef: bool,
         typedef_name: Option<String>,
         typedef_line: Option<u64>,
+        decl_file: Option<u64>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Compound>, Box<dyn std::error::Error>> {
         let mut enum_values = Vec::new();
@@ -651,6 +843,7 @@ impl DwarfParser {
             typedef_line,
             byte_size,
             base_classes: Vec::new(),
+            decl_file,
             is_virtual: false,
         }))
     }
@@ -674,6 +867,9 @@ impl DwarfParser {
             .get_u64_attr(entry, gimli::DW_AT_bit_offset)
             .or_else(|| self.get_u64_attr(entry, gimli::DW_AT_data_bit_offset));
 
+        let const_value = self.get_const_value(entry);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
+
         Ok(Some(Variable {
             name,
             type_info,
@@ -682,6 +878,8 @@ impl DwarfParser {
             offset,
             bit_size,
             bit_offset,
+            const_value,
+            decl_file,
         }))
     }
 
@@ -729,6 +927,9 @@ impl DwarfParser {
             type_info.is_extern = true;
         }
 
+        let const_value = self.get_const_value(entry);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
+
         Ok(Some(Variable {
             name,
             type_info,
@@ -737,6 +938,8 @@ impl DwarfParser {
             offset: None,
             bit_size: None,
             bit_offset: None,
+            const_value,
+            decl_file,
         }))
     }
 
@@ -781,6 +984,7 @@ impl DwarfParser {
             .get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
             .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
         let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Destructor detection by name (~ prefix)
         let is_destructor = is_method && name.starts_with('~');
@@ -790,6 +994,7 @@ impl DwarfParser {
         self.parse_function_children(
             unit,
             name,
+            decl_file,
             line,
             return_type,
             accessibility,
@@ -812,6 +1017,7 @@ impl DwarfParser {
         &mut self,
         unit: &DwarfUnit,
         name: String,
+        decl_file: Option<u64>,
         line: Option<u64>,
         return_type: TypeInfo,
         accessibility: Option<String>,
@@ -905,6 +1111,7 @@ impl DwarfParser {
             is_destructor,
             linkage_name,
             is_artificial,
+            decl_file,
         }))
     }
 
@@ -1011,7 +1218,15 @@ impl DwarfParser {
         let name = if let Some(origin_offset) =
             self.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin)
         {
-            self.abstract_origins.get(&origin_offset).cloned()
+            // Convert to absolute offset
+            let unit_base = unit
+                .header
+                .offset()
+                .as_debug_info_offset()
+                .map(|o| o.0)
+                .unwrap_or(0);
+            let abs_origin_offset = unit_base + origin_offset;
+            self.abstract_origins.get(&abs_origin_offset).cloned()
         } else {
             None
         };
@@ -1249,9 +1464,11 @@ impl DwarfParser {
                 // Get parameters
                 let mut entries = unit.entries_at_offset(entry.offset())?;
                 entries.next_dfs()?; // Skip the subroutine type itself
+                let mut absolute_depth = 0;
 
-                while let Some((depth, child_entry)) = entries.next_dfs()? {
-                    if depth == 0 {
+                while let Some((depth_delta, child_entry)) = entries.next_dfs()? {
+                    absolute_depth += depth_delta;
+                    if absolute_depth <= 0 {
                         break;
                     }
                     if child_entry.tag() == gimli::DW_TAG_formal_parameter {
@@ -1309,6 +1526,7 @@ impl DwarfParser {
                 AttributeValue::Data4(v) => return Some(v as u64),
                 AttributeValue::Data8(v) => return Some(v),
                 AttributeValue::Addr(v) => return Some(v),
+                AttributeValue::FileIndex(v) => return Some(v),
                 _ => {}
             }
         }
@@ -1391,10 +1609,30 @@ impl DwarfParser {
 
     fn get_accessibility(&self, entry: &DebuggingInformationEntry<DwarfReader>) -> Option<String> {
         if let Some(attr_value) = entry.attr(gimli::DW_AT_accessibility).ok()? {
+            if let AttributeValue::Accessibility(access) = attr_value.value() {
+                match access {
+                    gimli::DwAccess(1) => return Some("public".to_string()),
+                    gimli::DwAccess(2) => return Some("protected".to_string()),
+                    gimli::DwAccess(3) => return Some("private".to_string()),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    fn get_const_value(
+        &self,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Option<ConstValue> {
+        if let Some(attr_value) = entry.attr(gimli::DW_AT_const_value).ok()? {
             match attr_value.value() {
-                AttributeValue::Udata(1) => return Some("public".to_string()),
-                AttributeValue::Udata(2) => return Some("protected".to_string()),
-                AttributeValue::Udata(3) => return Some("private".to_string()),
+                AttributeValue::Sdata(v) => return Some(ConstValue::Signed(v)),
+                AttributeValue::Udata(v) => return Some(ConstValue::Unsigned(v)),
+                AttributeValue::Data1(v) => return Some(ConstValue::Unsigned(v as u64)),
+                AttributeValue::Data2(v) => return Some(ConstValue::Unsigned(v as u64)),
+                AttributeValue::Data4(v) => return Some(ConstValue::Unsigned(v as u64)),
+                AttributeValue::Data8(v) => return Some(ConstValue::Unsigned(v)),
                 _ => {}
             }
         }

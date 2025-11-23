@@ -4,23 +4,88 @@ use crate::types::*;
 use cpp_demangle::Symbol;
 use std::collections::HashMap;
 
+#[derive(Clone, Default)]
+pub struct CodeGenConfig {
+    #[allow(dead_code)]
+    pub shorten_int_types: bool,
+    pub no_function_addresses: bool,
+    pub no_zero_offsets: bool,
+    pub no_function_prototypes: bool,
+}
+
 pub struct CodeGenerator {
     output: String,
     indent_level: usize,
     type_sizes: HashMap<String, u64>,
+    config: CodeGenConfig,
 }
 
 impl CodeGenerator {
+    #[allow(dead_code)]
     pub fn with_type_sizes(type_sizes: HashMap<String, u64>) -> Self {
         CodeGenerator {
             output: String::new(),
             indent_level: 0,
             type_sizes,
+            config: CodeGenConfig::default(),
+        }
+    }
+
+    pub fn with_config(type_sizes: HashMap<String, u64>, config: CodeGenConfig) -> Self {
+        CodeGenerator {
+            output: String::new(),
+            indent_level: 0,
+            type_sizes,
+            config,
         }
     }
 
     fn indent(&self) -> String {
         "    ".repeat(self.indent_level)
+    }
+
+    #[allow(dead_code)]
+    fn shorten_type_name(&self, type_name: &str) -> String {
+        if !self.config.shorten_int_types {
+            return type_name.to_string();
+        }
+
+        // Apply type shortening rules
+        match type_name {
+            "short int" | "signed short int" | "short signed int" => "short".to_string(),
+            "short unsigned int" | "unsigned short int" => "unsigned short".to_string(),
+            "long int" | "signed long int" | "long signed int" => "long".to_string(),
+            "long unsigned int" | "unsigned long int" => "unsigned long".to_string(),
+            "long long int" | "signed long long int" | "long long signed int" => {
+                "long long".to_string()
+            }
+            "long long unsigned int" | "unsigned long long int" => "unsigned long long".to_string(),
+            "signed int" => "int".to_string(),
+            _ => type_name.to_string(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn format_type_string(&self, type_info: &TypeInfo, var_name: &str) -> String {
+        if !self.config.shorten_int_types {
+            return type_info.to_string(var_name);
+        }
+
+        // Clone type_info and shorten the base type
+        let mut shortened_type = type_info.clone();
+        shortened_type.base_type = self.shorten_type_name(&type_info.base_type);
+
+        // For function pointers, also shorten return type and parameter types
+        if shortened_type.is_function_pointer {
+            if let Some(ref mut ret_type) = shortened_type.function_return_type {
+                ret_type.base_type = self.shorten_type_name(&ret_type.base_type);
+            }
+            for param in &mut shortened_type.function_params {
+                param.base_type = self.shorten_type_name(&param.base_type);
+            }
+        }
+
+        shortened_type.to_string(var_name)
     }
 
     fn write_line(&mut self, line: &str) {
@@ -45,7 +110,7 @@ impl CodeGenerator {
         } else {
             // Calculate size based on base type
             match type_info.base_type.as_str() {
-                "char" | "unsigned char" | "signed char" | "bool" => 1,
+                "char" | "unsigned char" | "signed char" | "bool" | "boolean" => 1,
                 "short" | "short int" | "unsigned short" | "signed short"
                 | "short unsigned int" => 2,
                 "int" | "unsigned int" | "signed int" => 4,
@@ -78,12 +143,18 @@ impl CodeGenerator {
                 "nlink_t" => 4,
                 "blksize_t" => 4,
                 "blkcnt_t" => 4,
+                // Common typedefs from various libraries
+                "INT32" | "UINT32" | "DWORD" => 4,
+                "INT16" | "UINT16" | "WORD" => 2,
+                "INT8" | "UINT8" | "BYTE" => 1,
+                "INT64" | "UINT64" | "QWORD" => 8,
+                "JCOEF" => 2,      // JPEG coefficient (short)
+                "JDIMENSION" => 4, // JPEG dimension (unsigned int)
+                "JOCTET" => 1,     // JPEG octet (unsigned char)
                 // For struct/class types, look up the byte_size from parsed types
                 _ => {
                     // Look up the type size in our collected types
-                    *self.type_sizes.get(&type_info.base_type).unwrap_or_else(|| {
-                        panic!("Unknown type size for '{}'. Add it to the type size map or handle it in estimate_type_size.", type_info.base_type)
-                    })
+                    *self.type_sizes.get(&type_info.base_type).unwrap_or(&4) // Default to 4 bytes if unknown
                 }
             }
         };
@@ -104,6 +175,15 @@ impl CodeGenerator {
         // Add bitfield specification if present
         if let Some(bit_size) = var.bit_size {
             decl.push_str(&format!(" : {}", bit_size));
+        }
+
+        // Add const value if present
+        if let Some(ref const_val) = var.const_value {
+            decl.push_str(" = ");
+            match const_val {
+                ConstValue::Signed(v) => decl.push_str(&v.to_string()),
+                ConstValue::Unsigned(v) => decl.push_str(&v.to_string()),
+            }
         }
 
         decl
@@ -141,12 +221,73 @@ impl CodeGenerator {
         }
         self.output.push('\n');
 
-        for element in &cu.elements {
+        // Sort elements by line number (maintain DWARF order for same line)
+        let mut sorted_elements: Vec<(usize, &Element)> = cu.elements.iter().enumerate().collect();
+        sorted_elements.sort_by_key(|(idx, elem)| {
+            let line = match elem {
+                Element::Compound(c) => c.line,
+                Element::Function(f) => f.line,
+                Element::Variable(v) => v.line,
+                Element::Namespace(ns) => ns.line,
+            };
+            (line, *idx)
+        });
+
+        for (_, element) in sorted_elements {
             self.generate_element(element);
             self.output.push('\n');
         }
 
         self.write_line_comment("", &cu.name);
+    }
+
+    /// Generate a header file comment
+    pub fn generate_header_comment(&mut self, cu_name: &str, header_path: &str) {
+        self.write_line_comment("", header_path);
+        self.write_line(&format!("// Extracted from compile unit: {}", cu_name));
+        self.output.push('\n');
+    }
+
+    /// Generate a source file with specific elements
+    pub fn generate_source_file(
+        &mut self,
+        cu_name: &str,
+        producer: Option<&str>,
+        elements: &[&Element],
+    ) {
+        self.write_line_comment("", cu_name);
+        if let Some(prod) = producer {
+            self.write_line(&format!("// Compiler: {}", prod));
+        }
+        self.output.push('\n');
+
+        self.generate_elements(elements);
+
+        self.write_line_comment("", cu_name);
+    }
+
+    /// Generate elements (for header files or filtered source files)
+    pub fn generate_elements(&mut self, elements: &[&Element]) {
+        // Sort elements by line number (maintain DWARF order for same line)
+        let mut sorted_elements: Vec<(usize, &Element)> = elements
+            .iter()
+            .enumerate()
+            .map(|(idx, &elem)| (idx, elem))
+            .collect();
+        sorted_elements.sort_by_key(|(idx, elem)| {
+            let line = match elem {
+                Element::Compound(c) => c.line,
+                Element::Function(f) => f.line,
+                Element::Variable(v) => v.line,
+                Element::Namespace(ns) => ns.line,
+            };
+            (line, *idx)
+        });
+
+        for (_, element) in sorted_elements {
+            self.generate_element(element);
+            self.output.push('\n');
+        }
     }
 
     fn generate_element(&mut self, element: &Element) {
@@ -252,15 +393,15 @@ impl CodeGenerator {
             }
 
             line.push_str(&compound.compound_type);
-            line.push(' ');
 
             if let Some(ref name) = compound.name {
-                line.push_str(name);
                 line.push(' ');
+                line.push_str(name);
             }
 
             if use_typedef {
                 if let Some(ref tname) = compound.typedef_name {
+                    line.push(' ');
                     line.push_str(tname);
                 }
             }
@@ -286,9 +427,9 @@ impl CodeGenerator {
             }
 
             opening.push_str(&compound.compound_type);
-            opening.push(' ');
 
             if let Some(ref name) = compound.name {
+                opening.push(' ');
                 opening.push_str(name);
             }
 
@@ -438,7 +579,14 @@ impl CodeGenerator {
             self.indent_level += 1;
             self.write_line("private:");
             self.generate_members(private_members.to_vec().as_slice());
-            for method in &private_methods {
+            // Sort methods by line number
+            let mut sorted_methods: Vec<(usize, &Function)> = private_methods
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (i, f))
+                .collect();
+            sorted_methods.sort_by_key(|(idx, m)| (m.line, *idx));
+            for (_, method) in sorted_methods {
                 self.generate_method(method);
             }
             self.indent_level -= 1;
@@ -448,7 +596,14 @@ impl CodeGenerator {
             self.indent_level += 1;
             self.write_line("protected:");
             self.generate_members(protected_members.to_vec().as_slice());
-            for method in &protected_methods {
+            // Sort methods by line number
+            let mut sorted_methods: Vec<(usize, &Function)> = protected_methods
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (i, f))
+                .collect();
+            sorted_methods.sort_by_key(|(idx, m)| (m.line, *idx));
+            for (_, method) in sorted_methods {
                 self.generate_method(method);
             }
             self.indent_level -= 1;
@@ -458,7 +613,14 @@ impl CodeGenerator {
             self.indent_level += 1;
             self.write_line("public:");
             self.generate_members(public_members.to_vec().as_slice());
-            for method in &public_methods {
+            // Sort methods by line number
+            let mut sorted_methods: Vec<(usize, &Function)> = public_methods
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| (i, f))
+                .collect();
+            sorted_methods.sort_by_key(|(idx, m)| (m.line, *idx));
+            for (_, method) in sorted_methods {
                 self.generate_method(method);
             }
             self.indent_level -= 1;
@@ -476,21 +638,22 @@ impl CodeGenerator {
     }
 
     fn generate_members(&mut self, members: &[&Variable]) {
-        // Check if we have offset information for members - if so, use offset-based ordering
+        // Check if we have offset information for members
         let has_any_offsets = members.iter().any(|m| m.offset.is_some());
 
         if has_any_offsets {
-            // Use offset-based ordering with padding detection
-            let mut vars_with_offsets: Vec<_> = members
+            // Sort by line number first, then by offset, maintaining original order for ties
+            let mut vars_with_info: Vec<_> = members
                 .iter()
-                .filter_map(|v| v.offset.map(|o| (o, *v)))
+                .enumerate()
+                .filter_map(|(idx, v)| v.offset.map(|o| (idx, o, *v)))
                 .collect();
-            vars_with_offsets.sort_by_key(|(offset, _)| *offset);
+            vars_with_info.sort_by_key(|(idx, offset, v)| (v.line, *offset, *idx));
 
             let mut prev_end_offset = None;
 
             // Output members individually with offset information and padding
-            for (offset, var) in vars_with_offsets {
+            for (_, offset, var) in vars_with_info {
                 // Detect padding between members
                 if let Some(prev_end) = prev_end_offset {
                     if offset > prev_end {
@@ -510,7 +673,10 @@ impl CodeGenerator {
                 if let Some(line) = var.line {
                     decl.push_str(&format!(" //{}", line));
                 }
-                decl.push_str(&format!(" @ offset {}", offset));
+                // Skip offset 0 if configured
+                if !self.config.no_zero_offsets || offset != 0 {
+                    decl.push_str(&format!(" @ offset {}", offset));
+                }
 
                 // Add bit offset comment if it's a bitfield
                 if let (Some(_bit_size), Some(bit_offset)) = (var.bit_size, var.bit_offset) {
@@ -710,18 +876,20 @@ impl CodeGenerator {
     fn generate_function_metadata_comment(&self, func: &Function) -> String {
         let mut comment = String::new();
 
-        // Add linkage name (demangle C++ names if possible, otherwise show raw)
-        if let Some(ref linkage_name) = func.linkage_name {
-            if !comment.is_empty() {
-                comment.push(' ');
-            }
+        // Add linkage name (demangle C++ names if possible, otherwise show raw) if not disabled
+        if !self.config.no_function_prototypes {
+            if let Some(ref linkage_name) = func.linkage_name {
+                if !comment.is_empty() {
+                    comment.push(' ');
+                }
 
-            // Try to demangle C++ symbols
-            if let Ok(sym) = Symbol::new(linkage_name.as_bytes()) {
-                comment.push_str(&format!("[{}]", sym));
-            } else {
-                // Not a C++ mangled name (e.g., C function), show as-is
-                comment.push_str(&format!("[{}]", linkage_name));
+                // Try to demangle C++ symbols
+                if let Ok(sym) = Symbol::new(linkage_name.as_bytes()) {
+                    comment.push_str(&format!("[{}]", sym));
+                } else {
+                    // Not a C++ mangled name (e.g., C function), show as-is
+                    comment.push_str(&format!("[{}]", linkage_name));
+                }
             }
         }
 
@@ -736,11 +904,28 @@ impl CodeGenerator {
         comment
     }
 
+    fn insert_semicolon_before_comment(&self, decl: &str) -> String {
+        // Find the position of the first comment marker "//"
+        // We need to insert the semicolon before it
+        if let Some(comment_pos) = decl.rfind(" //") {
+            let mut result = String::new();
+            result.push_str(&decl[..comment_pos]);
+            result.push(';');
+            result.push_str(&decl[comment_pos..]);
+            result
+        } else {
+            // No comment found, just add semicolon at the end
+            format!("{};", decl)
+        }
+    }
+
     fn generate_function(&mut self, func: &Function) {
-        // Write address comment above function if available
-        if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
-            let size = high.saturating_sub(low);
-            self.write_line(&format!("// @ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
+        // Write address comment above function if available and not disabled
+        if !self.config.no_function_addresses {
+            if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
+                let size = high.saturating_sub(low);
+                self.write_line(&format!("// @ 0x{:x}-0x{:x} ({} bytes)", low, high, size));
+            }
         }
 
         let decl = self.generate_function_declaration(func);
@@ -751,10 +936,9 @@ impl CodeGenerator {
                 && func.inlined_calls.is_empty()
                 && func.labels.is_empty())
         {
-            // Function declaration only - add semicolon
-            // The declaration may be multi-line with embedded line comments
-            // Semicolon should be appended to the declaration string itself
-            self.write_line(&format!("{};", decl));
+            // Function declaration only - add semicolon before line comment
+            let decl_with_semicolon = self.insert_semicolon_before_comment(&decl);
+            self.write_line(&decl_with_semicolon);
         } else {
             self.write_line(&decl);
 
@@ -850,11 +1034,6 @@ impl CodeGenerator {
                 }
             } else {
                 // Parameters on different lines
-                if let Some(line) = func.line {
-                    decl.push_str(&format!(" //{}", line));
-                }
-                decl.push('\n');
-
                 // Group parameters by line
                 let mut param_lines: HashMap<Option<u64>, Vec<&Parameter>> = HashMap::new();
                 for param in &params {
@@ -864,25 +1043,59 @@ impl CodeGenerator {
                 let mut sorted_lines: Vec<_> = param_lines.iter().collect();
                 sorted_lines.sort_by_key(|(line, _)| *line);
 
+                // Check if first params are on the same line as the function
+                let first_params_on_func_line =
+                    !sorted_lines.is_empty() && sorted_lines[0].0 == &func.line;
+
                 for (idx, (line, params_at_line)) in sorted_lines.iter().enumerate() {
-                    decl.push_str(&self.indent());
-                    decl.push_str("        ");
-
-                    for (i, param) in params_at_line.iter().enumerate() {
-                        if i > 0 {
-                            decl.push_str(", ");
+                    // First group: put on same line as function if they share the same line number
+                    if idx == 0 && first_params_on_func_line {
+                        // Put first params on same line as function name
+                        for (i, param) in params_at_line.iter().enumerate() {
+                            if i > 0 {
+                                decl.push_str(", ");
+                            }
+                            decl.push_str(&param.type_info.to_string(&param.name));
                         }
-                        decl.push_str(&param.type_info.to_string(&param.name));
-                    }
 
-                    if idx == sorted_lines.len() - 1 {
-                        decl.push(')');
+                        if sorted_lines.len() == 1 {
+                            decl.push(')');
+                        } else {
+                            decl.push(',');
+                        }
+
+                        if let Some(l) = line {
+                            decl.push_str(&format!(" //{}", l));
+                        }
+
+                        if sorted_lines.len() > 1 {
+                            decl.push('\n');
+                        }
                     } else {
-                        decl.push(',');
-                    }
+                        // Subsequent groups: put on new lines with indentation
+                        decl.push_str(&self.indent());
+                        decl.push_str("        ");
 
-                    if let Some(l) = line {
-                        decl.push_str(&format!(" //{}", l));
+                        for (i, param) in params_at_line.iter().enumerate() {
+                            if i > 0 {
+                                decl.push_str(", ");
+                            }
+                            decl.push_str(&param.type_info.to_string(&param.name));
+                        }
+
+                        if idx == sorted_lines.len() - 1 {
+                            decl.push(')');
+                        } else {
+                            decl.push(',');
+                        }
+
+                        if let Some(l) = line {
+                            decl.push_str(&format!(" //{}", l));
+                        }
+
+                        if idx < sorted_lines.len() - 1 {
+                            decl.push('\n');
+                        }
                     }
 
                     // Add metadata on the last parameter line
@@ -895,10 +1108,6 @@ impl CodeGenerator {
                             decl.push(' ');
                             decl.push_str(&metadata);
                         }
-                    }
-
-                    if idx < sorted_lines.len() - 1 {
-                        decl.push('\n');
                     }
                 }
             }
@@ -978,24 +1187,43 @@ impl CodeGenerator {
                         decls.push(decl);
                     }
                 } else {
-                    let base_type = &group[0].type_info;
-                    let mut var_names = Vec::new();
+                    // Check if any variables in this group have const values
+                    // If so, output them individually
+                    let has_const_values = group.iter().any(|v| v.const_value.is_some());
 
-                    for var in group {
-                        let ptr_str = "*".repeat(var.type_info.pointer_count);
-                        let mut name_with_array = format!("{}{}", ptr_str, var.name);
+                    if has_const_values {
+                        // Output individually with const values
+                        for var in group {
+                            let mut decl = var.type_info.to_string(&var.name);
+                            if let Some(ref const_val) = var.const_value {
+                                decl.push_str(" = ");
+                                match const_val {
+                                    ConstValue::Signed(v) => decl.push_str(&v.to_string()),
+                                    ConstValue::Unsigned(v) => decl.push_str(&v.to_string()),
+                                }
+                            }
+                            decls.push(decl);
+                        }
+                    } else {
+                        let base_type = &group[0].type_info;
+                        let mut var_names = Vec::new();
 
-                        for size in &var.type_info.array_sizes {
-                            name_with_array.push_str(&format!("[{}]", size));
+                        for var in group {
+                            let ptr_str = "*".repeat(var.type_info.pointer_count);
+                            let mut name_with_array = format!("{}{}", ptr_str, var.name);
+
+                            for size in &var.type_info.array_sizes {
+                                name_with_array.push_str(&format!("[{}]", size));
+                            }
+
+                            var_names.push(name_with_array);
                         }
 
-                        var_names.push(name_with_array);
+                        let mut decl = base_type.base_type.clone();
+                        decl.push(' ');
+                        decl.push_str(&var_names.join(", "));
+                        decls.push(decl);
                     }
-
-                    let mut decl = base_type.base_type.clone();
-                    decl.push(' ');
-                    decl.push_str(&var_names.join(", "));
-                    decls.push(decl);
                 }
             }
 
@@ -1041,12 +1269,19 @@ impl CodeGenerator {
     }
 
     fn generate_global_variable(&mut self, var: &Variable) {
+        let mut decl = var.type_info.to_string(&var.name);
+
+        // Add const value if present
+        if let Some(ref const_val) = var.const_value {
+            decl.push_str(" = ");
+            match const_val {
+                ConstValue::Signed(v) => decl.push_str(&v.to_string()),
+                ConstValue::Unsigned(v) => decl.push_str(&v.to_string()),
+            }
+        }
+
         let line_comment = var.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-        self.write_line(&format!(
-            "{};{}",
-            var.type_info.to_string(&var.name),
-            line_comment
-        ));
+        self.write_line(&format!("{};{}", decl, line_comment));
     }
 
     pub fn get_output(self) -> String {
