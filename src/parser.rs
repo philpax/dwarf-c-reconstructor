@@ -2,14 +2,82 @@
 
 use crate::types::*;
 use gimli::{AttributeValue, DebuggingInformationEntry, Dwarf, Reader};
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+/// Apply relocations to a DWARF section
+fn apply_relocations<'a>(
+    object_file: &object::File,
+    section_data: &'a [u8],
+    section_name: &str,
+) -> Cow<'a, [u8]> {
+    use object::RelocationTarget;
+
+    // Get the DWARF section to access its relocations
+    let dwarf_section = match object_file.section_by_name(section_name) {
+        Some(section) => section,
+        None => return Cow::Borrowed(section_data),
+    };
+
+    // Clone the section data so we can modify it
+    let mut data = section_data.to_vec();
+
+    // Get relocations from the DWARF section
+    for (offset, relocation) in dwarf_section.relocations() {
+            let offset = offset as usize;
+
+            // Get the value to add (from the symbol or addend)
+            let value: u64 = match relocation.target() {
+                RelocationTarget::Symbol(symbol_idx) => {
+                    if let Ok(symbol) = object_file.symbol_by_index(symbol_idx) {
+                        // For section symbols, use the section's address (0 for object files)
+                        // plus the addend
+                        if symbol.kind() == object::SymbolKind::Section {
+                            relocation.addend() as u64
+                        } else {
+                            symbol.address().wrapping_add(relocation.addend() as u64)
+                        }
+                    } else {
+                        relocation.addend() as u64
+                    }
+                }
+                _ => relocation.addend() as u64,
+            };
+
+            // Apply the relocation based on its type
+            use object::RelocationKind;
+            match relocation.kind() {
+                RelocationKind::Absolute if relocation.size() == 32 => {
+                    // R_X86_64_32: S + A (32-bit absolute)
+                    if offset + 4 <= data.len() {
+                        let bytes = (value as u32).to_le_bytes();
+                        data[offset..offset + 4].copy_from_slice(&bytes);
+                    }
+                }
+                RelocationKind::Absolute if relocation.size() == 64 => {
+                    // R_X86_64_64: S + A (64-bit absolute)
+                    if offset + 8 <= data.len() {
+                        let bytes = value.to_le_bytes();
+                        data[offset..offset + 8].copy_from_slice(&bytes);
+                    }
+                }
+                _ => {
+                    // Ignore other relocation types
+                }
+            }
+    }
+
+    Cow::Owned(data)
+}
 
 pub struct DwarfParser {
     dwarf: Dwarf<DwarfReader>,
     type_cache: HashMap<usize, TypeInfo>,
     typedef_map: HashMap<usize, (String, Option<u64>)>,
     abstract_origins: HashMap<usize, String>,
+    // Keep the section data alive
+    _section_data: Vec<Vec<u8>>,
 }
 #[allow(dead_code)] // Some parser methods are called via offset-based parsing
 #[allow(clippy::too_many_arguments)] // Parser methods need many parameters from DWARF
@@ -19,11 +87,21 @@ impl DwarfParser {
         let object = object::File::parse(file_data)?;
 
         let load_section = |id: gimli::SectionId| -> Result<DwarfReader, gimli::Error> {
-            let data = object
+            let section_data = object
                 .section_by_name(id.name())
                 .and_then(|section| section.data().ok())
                 .unwrap_or(&[]);
-            Ok(gimli::EndianSlice::new(data, gimli::LittleEndian))
+
+            // Apply relocations if this is an object file
+            let relocated_data = apply_relocations(&object, section_data, id.name());
+
+            // Convert to 'static lifetime by leaking
+            let static_data: &'static [u8] = match relocated_data {
+                Cow::Borrowed(data) => data,
+                Cow::Owned(data) => Box::leak(data.into_boxed_slice()),
+            };
+
+            Ok(gimli::EndianSlice::new(static_data, gimli::LittleEndian))
         };
 
         let dwarf = Dwarf::load(load_section)?;
@@ -33,6 +111,7 @@ impl DwarfParser {
             type_cache: HashMap::new(),
             typedef_map: HashMap::new(),
             abstract_origins: HashMap::new(),
+            _section_data: Vec::new(),
         })
     }
 

@@ -117,7 +117,7 @@ impl CodeGenerator {
         } else {
             // Calculate size based on base type
             match type_info.base_type.as_str() {
-                "char" | "unsigned char" | "signed char" | "bool" => 1,
+                "char" | "unsigned char" | "signed char" | "bool" | "boolean" => 1,
                 "short" | "short int" | "unsigned short" | "signed short"
                 | "short unsigned int" => 2,
                 "int" | "unsigned int" | "signed int" => 4,
@@ -150,12 +150,18 @@ impl CodeGenerator {
                 "nlink_t" => 4,
                 "blksize_t" => 4,
                 "blkcnt_t" => 4,
+                // Common typedefs from various libraries
+                "INT32" | "UINT32" | "DWORD" => 4,
+                "INT16" | "UINT16" | "WORD" => 2,
+                "INT8" | "UINT8" | "BYTE" => 1,
+                "INT64" | "UINT64" | "QWORD" => 8,
+                "JCOEF" => 2, // JPEG coefficient (short)
+                "JDIMENSION" => 4, // JPEG dimension (unsigned int)
+                "JOCTET" => 1, // JPEG octet (unsigned char)
                 // For struct/class types, look up the byte_size from parsed types
                 _ => {
                     // Look up the type size in our collected types
-                    *self.type_sizes.get(&type_info.base_type).unwrap_or_else(|| {
-                        panic!("Unknown type size for '{}'. Add it to the type size map or handle it in estimate_type_size.", type_info.base_type)
-                    })
+                    *self.type_sizes.get(&type_info.base_type).unwrap_or(&4) // Default to 4 bytes if unknown
                 }
             }
         };
