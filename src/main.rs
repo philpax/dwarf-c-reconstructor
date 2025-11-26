@@ -78,6 +78,10 @@ struct Args {
     /// Remove function prototype comments
     #[arg(long)]
     no_function_prototypes: bool,
+
+    /// Enable all --no-* options (minimal output with no addresses, offsets, or prototypes)
+    #[arg(long)]
+    minimal: bool,
 }
 
 fn main() -> Result<()> {
@@ -107,11 +111,12 @@ fn main() -> Result<()> {
     fs::create_dir_all(output_dir)?;
 
     // Create config from command-line args
+    // If --minimal is set, enable all --no-* options
     let config = CodeGenConfig {
         shorten_int_types: args.shorten_int_types,
-        no_function_addresses: args.no_function_addresses,
-        no_offsets: args.no_offsets,
-        no_function_prototypes: args.no_function_prototypes,
+        no_function_addresses: args.no_function_addresses || args.minimal,
+        no_offsets: args.no_offsets || args.minimal,
+        no_function_prototypes: args.no_function_prototypes || args.minimal,
     };
 
     for cu in &compile_units {
@@ -124,6 +129,7 @@ fn main() -> Result<()> {
                 types::Element::Function(f) => f.decl_file,
                 types::Element::Variable(v) => v.decl_file,
                 types::Element::Namespace(_) => None, // Namespaces don't have decl_file
+                types::Element::TypedefAlias(t) => t.decl_file,
             };
 
             elements_by_file.entry(decl_file).or_default().push(element);

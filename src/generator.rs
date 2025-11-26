@@ -229,6 +229,7 @@ impl CodeGenerator {
                 Element::Function(f) => f.line,
                 Element::Variable(v) => v.line,
                 Element::Namespace(ns) => ns.line,
+                Element::TypedefAlias(t) => t.line,
             };
             (line, *idx)
         });
@@ -280,6 +281,7 @@ impl CodeGenerator {
                 Element::Function(f) => f.line,
                 Element::Variable(v) => v.line,
                 Element::Namespace(ns) => ns.line,
+                Element::TypedefAlias(t) => t.line,
             };
             (line, *idx)
         });
@@ -296,6 +298,7 @@ impl CodeGenerator {
             Element::Function(f) => self.generate_function(f),
             Element::Variable(v) => self.generate_global_variable(v),
             Element::Namespace(ns) => self.generate_namespace(ns),
+            Element::TypedefAlias(t) => self.generate_typedef_alias(t),
         }
     }
 
@@ -557,8 +560,9 @@ impl CodeGenerator {
         for member in &compound.members {
             match member.accessibility.as_deref() {
                 Some("protected") => protected_members.push(member),
-                Some("private") => private_members.push(member),
-                _ => public_members.push(member), // Default to public
+                Some("public") => public_members.push(member),
+                // Default to private for classes (no accessibility or "private")
+                _ => private_members.push(member),
             }
         }
 
@@ -569,15 +573,16 @@ impl CodeGenerator {
         for method in &compound.methods {
             match method.accessibility.as_deref() {
                 Some("protected") => protected_methods.push(method),
-                Some("private") => private_methods.push(method),
-                _ => public_methods.push(method), // Default to public
+                Some("public") => public_methods.push(method),
+                // Default to private for classes (no accessibility or "private")
+                _ => private_methods.push(method),
             }
         }
 
-        // Write sections
+        // Write sections - access specifiers at same indent level as class
         if !private_members.is_empty() || !private_methods.is_empty() {
-            self.indent_level += 1;
             self.write_line("private:");
+            self.indent_level += 1;
             self.generate_members(private_members.to_vec().as_slice());
             // Sort methods by line number
             let mut sorted_methods: Vec<(usize, &Function)> = private_methods
@@ -593,8 +598,8 @@ impl CodeGenerator {
         }
 
         if !protected_members.is_empty() || !protected_methods.is_empty() {
-            self.indent_level += 1;
             self.write_line("protected:");
+            self.indent_level += 1;
             self.generate_members(protected_members.to_vec().as_slice());
             // Sort methods by line number
             let mut sorted_methods: Vec<(usize, &Function)> = protected_methods
@@ -610,8 +615,8 @@ impl CodeGenerator {
         }
 
         if !public_members.is_empty() || !public_methods.is_empty() {
-            self.indent_level += 1;
             self.write_line("public:");
+            self.indent_level += 1;
             self.generate_members(public_members.to_vec().as_slice());
             // Sort methods by line number
             let mut sorted_methods: Vec<(usize, &Function)> = public_methods
@@ -840,11 +845,11 @@ impl CodeGenerator {
         decl.push_str(&func.name);
         decl.push('(');
 
-        // Parameters (skip 'this' for methods)
+        // Parameters (skip 'this' without line number for methods - these are implicit)
         let params: Vec<_> = func
             .parameters
             .iter()
-            .filter(|p| p.name != "this")
+            .filter(|p| !(p.name == "this" && p.line.is_none()))
             .collect();
 
         for (i, param) in params.iter().enumerate() {
@@ -942,15 +947,31 @@ impl CodeGenerator {
         } else {
             self.write_line(&decl);
 
-            // Check if we have a single lexical block at top level with no other variables
-            let single_block = func.lexical_blocks.len() == 1
+            // Check if we have a single lexical block at top level with only labels (no other variables/inlined calls)
+            // In this case, we output the block contents directly without extra braces,
+            // and labels are at function indentation level
+            let single_block_with_labels = func.lexical_blocks.len() == 1
                 && func.variables.is_empty()
-                && func.inlined_calls.is_empty()
-                && func.labels.is_empty();
+                && func.inlined_calls.is_empty();
 
-            if single_block {
-                // Use the lexical block's braces
-                self.generate_lexical_block(&func.lexical_blocks[0]);
+            if single_block_with_labels {
+                // Use function braces to contain the block's content, with labels outside at function level
+                self.write_line("{");
+                self.indent_level += 1;
+
+                // Output the lexical block's contents (without its own braces)
+                self.generate_lexical_block_contents(&func.lexical_blocks[0]);
+
+                self.indent_level -= 1;
+
+                // Output labels at function level (no indentation within function body)
+                for label in &func.labels {
+                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+                    self.output
+                        .push_str(&format!("{}:{}\n", label.name, line_comment));
+                }
+
+                self.write_line("}");
             } else {
                 // Add our own braces
                 self.write_line("{");
@@ -993,11 +1014,11 @@ impl CodeGenerator {
         decl.push_str(&func.name);
         decl.push('(');
 
-        // Parameters (skip 'this' for methods)
+        // Parameters (skip 'this' without line number for methods - these are implicit)
         let params: Vec<_> = func
             .parameters
             .iter()
-            .filter(|p| !(func.is_method && p.name == "this"))
+            .filter(|p| !(p.name == "this" && p.line.is_none()))
             .collect();
 
         if params.is_empty() {
@@ -1078,6 +1099,11 @@ impl CodeGenerator {
                             decl.push('\n');
                         }
                     } else {
+                        // First param group NOT on func line needs a newline before it
+                        if idx == 0 && !first_params_on_func_line {
+                            decl.push('\n');
+                        }
+
                         // Subsequent groups: put on new lines with indentation
                         decl.push_str(&self.indent());
                         decl.push_str("        ");
@@ -1310,7 +1336,13 @@ impl CodeGenerator {
     fn generate_lexical_block(&mut self, block: &LexicalBlock) {
         self.write_line("{");
         self.indent_level += 1;
+        self.generate_lexical_block_contents(block);
+        self.indent_level -= 1;
+        self.write_line("}");
+    }
 
+    /// Generate the contents of a lexical block without the surrounding braces
+    fn generate_lexical_block_contents(&mut self, block: &LexicalBlock) {
         // Collect all elements with their indices for stable sorting
         enum BlockElement<'a> {
             Variable(&'a Variable, usize),
@@ -1397,9 +1429,6 @@ impl CodeGenerator {
         if !variables_buffer.is_empty() {
             self.generate_variables(&variables_buffer);
         }
-
-        self.indent_level -= 1;
-        self.write_line("}");
     }
 
     fn generate_global_variable(&mut self, var: &Variable) {
@@ -1416,6 +1445,20 @@ impl CodeGenerator {
 
         let line_comment = var.line.map(|l| format!(" //{}", l)).unwrap_or_default();
         self.write_line(&format!("{};{}", decl, line_comment));
+    }
+
+    fn generate_typedef_alias(&mut self, typedef_alias: &TypedefAlias) {
+        let mut decl = format!(
+            "typedef {} {}",
+            typedef_alias.target_type, typedef_alias.name
+        );
+        decl.push(';');
+
+        if let Some(line) = typedef_alias.line {
+            decl.push_str(&format!(" //{}", line));
+        }
+
+        self.write_line(&decl);
     }
 
     pub fn get_output(self) -> String {
