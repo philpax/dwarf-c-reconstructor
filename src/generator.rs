@@ -131,7 +131,11 @@ impl CodeGenerator {
                 "int" | "unsigned int" | "signed int" => 4,
                 // long is 4 bytes on 32-bit, but can vary; use pointer size for LP64/LLP64 compat
                 "long" | "unsigned long" | "signed long" | "long int" | "long unsigned int" => {
-                    if ptr_size == 8 { 8 } else { 4 }
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
                 }
                 "long long"
                 | "unsigned long long"
@@ -140,7 +144,13 @@ impl CodeGenerator {
                 | "long long unsigned int" => 8,
                 "float" => 4,
                 "double" => 8,
-                "long double" => if ptr_size == 8 { 16 } else { 12 }, // Architecture dependent
+                "long double" => {
+                    if ptr_size == 8 {
+                        16
+                    } else {
+                        12
+                    }
+                } // Architecture dependent
                 "void" => 0,
                 // For GLuint, GLint and similar types (typically typedef to unsigned int / int)
                 s if s.starts_with("GL") => 4,
@@ -148,19 +158,73 @@ impl CodeGenerator {
                 "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => ptr_size,
                 // Other common system types (typically 4 bytes even on 64-bit)
                 "fpos_t" => ptr_size, // Often contains a pointer
-                "time_t" => if ptr_size == 8 { 8 } else { 4 },
-                "off_t" => if ptr_size == 8 { 8 } else { 4 },
+                "time_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "off_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 "pid_t" => 4,
                 "uid_t" => 4,
                 "gid_t" => 4,
-                "suseconds_t" => if ptr_size == 8 { 8 } else { 4 },
-                "clock_t" => if ptr_size == 8 { 8 } else { 4 },
-                "dev_t" => if ptr_size == 8 { 8 } else { 4 },
-                "ino_t" => if ptr_size == 8 { 8 } else { 4 },
+                "suseconds_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "clock_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "dev_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "ino_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 "mode_t" => 4,
-                "nlink_t" => if ptr_size == 8 { 8 } else { 4 },
-                "blksize_t" => if ptr_size == 8 { 8 } else { 4 },
-                "blkcnt_t" => if ptr_size == 8 { 8 } else { 4 },
+                "nlink_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "blksize_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "blkcnt_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 // Common typedefs from various libraries
                 "INT32" | "UINT32" | "DWORD" => 4,
                 "INT16" | "UINT16" | "WORD" => 2,

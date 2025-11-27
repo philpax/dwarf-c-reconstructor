@@ -31,12 +31,10 @@ fn detect_pointer_size(data: &[u8]) -> u64 {
 
 /// Detect pointer size from an archive by checking the first object member
 fn detect_pointer_size_from_archive(archive: &ArchiveFile<'_>, archive_data: &[u8]) -> u64 {
-    for member_result in archive.members() {
-        if let Ok(member) = member_result {
-            if let Ok(member_data) = member.data(archive_data) {
-                if object::File::parse(member_data).is_ok() {
-                    return detect_pointer_size(member_data);
-                }
+    for member in archive.members().flatten() {
+        if let Ok(member_data) = member.data(archive_data) {
+            if object::File::parse(member_data).is_ok() {
+                return detect_pointer_size(member_data);
             }
         }
     }
