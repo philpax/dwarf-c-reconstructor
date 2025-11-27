@@ -1457,12 +1457,8 @@ impl<'a> DwarfParser<'a> {
                 _ => {}
             }
 
-            // Resolve the type to get the string representation
-            let type_info = self.resolve_type_entry(unit, type_entry)?;
-            let target_type = type_info.to_string("");
-
-            // Clean up the target type string (remove trailing space from to_string)
-            let target_type = target_type.trim().to_string();
+            // Resolve the type
+            let target_type = self.resolve_type_entry(unit, type_entry)?;
 
             Ok(Some(TypedefAlias {
                 name,
