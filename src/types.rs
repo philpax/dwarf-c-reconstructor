@@ -228,12 +228,23 @@ pub struct Namespace {
     pub children: Vec<Element>,
 }
 
+/// A typedef that points to another type (not a struct/class/union/enum)
+/// Used for cases like `typedef mpVector2 CharaPoint;`
+#[derive(Debug)]
+pub struct TypedefAlias {
+    pub name: String,
+    pub target_type: String,
+    pub line: Option<u64>,
+    pub decl_file: Option<u64>,
+}
+
 #[derive(Debug)]
 pub enum Element {
     Compound(Compound),
     Function(Function),
     Variable(Variable),
     Namespace(Namespace),
+    TypedefAlias(TypedefAlias),
 }
 
 #[derive(Debug)]

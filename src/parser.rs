@@ -498,9 +498,14 @@ impl<'a> DwarfParser<'a> {
                             elements.push(Element::Variable(var));
                         }
                     }
-                    // Skip base_type and typedef at top level - they'll be resolved when referenced
+                    gimli::DW_TAG_typedef => {
+                        // Parse typedefs that point to other typedefs or base types
+                        if let Some(typedef_alias) = self.parse_typedef_alias(unit, entry)? {
+                            elements.push(Element::TypedefAlias(typedef_alias));
+                        }
+                    }
+                    // Skip base_type at top level - they'll be resolved when referenced
                     gimli::DW_TAG_base_type
-                    | gimli::DW_TAG_typedef
                     | gimli::DW_TAG_pointer_type
                     | gimli::DW_TAG_const_type
                     | gimli::DW_TAG_array_type
@@ -1414,6 +1419,62 @@ impl<'a> DwarfParser<'a> {
         Ok(Some(Label { name, line }))
     }
 
+    /// Parse a typedef entry and return a TypedefAlias if it points to another typedef or base type
+    /// (not a struct/class/union/enum, which are handled via merging)
+    fn parse_typedef_alias(
+        &mut self,
+        unit: &DwarfUnit,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Result<Option<TypedefAlias>> {
+        let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
+        let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
+        let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
+
+        // Get what this typedef points to
+        let type_offset = match self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
+            Some(offset) => offset,
+            None => return Ok(None), // typedef with no type
+        };
+
+        // Resolve the target type
+        let unit_offset = gimli::UnitOffset(type_offset);
+        let mut entries = unit.entries_at_offset(unit_offset)?;
+
+        if let Some((_, type_entry)) = entries.next_dfs()? {
+            // Check if the target is a struct/class/union/enum - these are handled by merging
+            match type_entry.tag() {
+                gimli::DW_TAG_structure_type
+                | gimli::DW_TAG_class_type
+                | gimli::DW_TAG_union_type
+                | gimli::DW_TAG_enumeration_type => {
+                    // These are handled by the typedef_map merging, skip them
+                    return Ok(None);
+                }
+                _ => {}
+            }
+
+            // Resolve the type to get the string representation
+            let type_info = self.resolve_type_entry(unit, type_entry)?;
+            let target_type = type_info.to_string("");
+
+            // Clean up the target type string (remove trailing space from to_string)
+            let target_type = target_type.trim().to_string();
+
+            Ok(Some(TypedefAlias {
+                name,
+                target_type,
+                line,
+                decl_file,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn resolve_type(
         &mut self,
         unit: &DwarfUnit,
@@ -1609,8 +1670,9 @@ impl<'a> DwarfParser<'a> {
 
                 // Get return type
                 if let Some(ret_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
-                    let ret_type = self.resolve_type_from_offset(unit, ret_offset)?;
-                    func_type.function_return_type = Some(Box::new(ret_type));
+                    if let Ok(ret_type) = self.resolve_type_from_offset(unit, ret_offset) {
+                        func_type.function_return_type = Some(Box::new(ret_type));
+                    }
                 }
 
                 // Get parameters
@@ -1624,11 +1686,26 @@ impl<'a> DwarfParser<'a> {
                         break;
                     }
                     if child_entry.tag() == gimli::DW_TAG_formal_parameter {
+                        // Try to get the parameter type
                         if let Some(param_offset) =
                             self.get_ref_attr(unit, child_entry, gimli::DW_AT_type)
                         {
-                            let param_type = self.resolve_type_from_offset(unit, param_offset)?;
-                            func_type.function_params.push(param_type);
+                            if let Ok(param_type) =
+                                self.resolve_type_from_offset(unit, param_offset)
+                            {
+                                func_type.function_params.push(param_type);
+                            } else {
+                                // Cross-unit or unresolvable reference - use void* as fallback
+                                let mut void_ptr = TypeInfo::new("void".to_string());
+                                void_ptr.pointer_count = 1;
+                                func_type.function_params.push(void_ptr);
+                            }
+                        } else {
+                            // No type attribute or unresolvable - check if there's a name
+                            // For unnamed parameters with no type, assume void* if formal_parameter exists
+                            let mut void_ptr = TypeInfo::new("void".to_string());
+                            void_ptr.pointer_count = 1;
+                            func_type.function_params.push(void_ptr);
                         }
                     }
                 }
@@ -1747,13 +1824,30 @@ impl<'a> DwarfParser<'a> {
 
     fn get_ref_attr(
         &self,
-        _unit: &DwarfUnit,
+        unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
         attr: gimli::DwAt,
     ) -> Option<usize> {
         if let Some(attr_value) = entry.attr(attr).ok()? {
-            if let AttributeValue::UnitRef(offset) = attr_value.value() {
-                return Some(offset.0);
+            match attr_value.value() {
+                AttributeValue::UnitRef(offset) => return Some(offset.0),
+                AttributeValue::DebugInfoRef(offset) => {
+                    // This is an absolute reference (DW_FORM_ref_addr)
+                    // Convert to unit-relative offset if within this unit
+                    let unit_base = unit
+                        .header
+                        .offset()
+                        .as_debug_info_offset()
+                        .map(|o| o.0)
+                        .unwrap_or(0);
+                    if offset.0 >= unit_base {
+                        return Some(offset.0 - unit_base);
+                    }
+                    // If it's before our unit, it's a cross-unit reference
+                    // which we can't resolve with unit-relative offsets
+                    // Return None and let the caller handle it
+                }
+                _ => {}
             }
         }
         None

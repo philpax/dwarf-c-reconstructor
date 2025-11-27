@@ -46,3 +46,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --verbose --release
+
+  samples:
+    name: Test Samples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release
+      - name: Test all samples
+        run: |
+          for sample in samples/*; do
+            if [ -f "$sample" ]; then
+              echo "Processing: $sample"
+              ./target/release/dwarf-c-reconstructor "$sample" -o output_test || exit 1
+              rm -rf output_test
+            fi
+          done
+          echo "All samples processed successfully!"
