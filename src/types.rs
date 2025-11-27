@@ -233,7 +233,7 @@ pub struct Namespace {
 #[derive(Debug)]
 pub struct TypedefAlias {
     pub name: String,
-    pub target_type: String,
+    pub target_type: TypeInfo,
     pub line: Option<u64>,
     pub decl_file: Option<u64>,
 }

@@ -7,6 +7,7 @@ use clap::Parser as ClapParser;
 use error::Result;
 use generator::{CodeGenConfig, CodeGenerator};
 use object::read::archive::ArchiveFile;
+use object::Object;
 use parser::DwarfParser;
 use std::collections::HashMap;
 use std::fs;
@@ -16,6 +17,28 @@ use std::path::Path;
 fn parse_object_file(data: &[u8]) -> Result<Vec<types::CompileUnit>> {
     let mut parser = DwarfParser::new(data)?;
     parser.parse()
+}
+
+/// Detect pointer size from an object file (returns 4 for 32-bit, 8 for 64-bit)
+fn detect_pointer_size(data: &[u8]) -> u64 {
+    if let Ok(obj) = object::File::parse(data) {
+        if obj.is_64() {
+            return 8;
+        }
+    }
+    4 // Default to 32-bit
+}
+
+/// Detect pointer size from an archive by checking the first object member
+fn detect_pointer_size_from_archive(archive: &ArchiveFile<'_>, archive_data: &[u8]) -> u64 {
+    for member in archive.members().flatten() {
+        if let Ok(member_data) = member.data(archive_data) {
+            if object::File::parse(member_data).is_ok() {
+                return detect_pointer_size(member_data);
+            }
+        }
+    }
+    4 // Default to 32-bit
 }
 
 /// Parse an archive file and process all object file members
@@ -91,13 +114,17 @@ fn main() -> Result<()> {
     let file_data = fs::read(&args.file_path)?;
     let file_data_slice: &[u8] = &file_data;
 
-    // Try to parse as archive first, then fall back to regular object file
-    let compile_units = if let Ok(archive) = ArchiveFile::parse(file_data_slice) {
-        // It's an archive file - process each member
-        parse_archive(archive, file_data_slice)?
+    // Detect pointer size and parse file
+    let (compile_units, pointer_size) = if let Ok(archive) = ArchiveFile::parse(file_data_slice) {
+        // It's an archive file - detect pointer size and process each member
+        let ptr_size = detect_pointer_size_from_archive(&archive, file_data_slice);
+        // Re-parse archive for member iteration (iterators are consumed)
+        let archive = ArchiveFile::parse(file_data_slice)?;
+        (parse_archive(archive, file_data_slice)?, ptr_size)
     } else {
         // It's a regular object file
-        parse_object_file(file_data_slice)?
+        let ptr_size = detect_pointer_size(file_data_slice);
+        (parse_object_file(file_data_slice)?, ptr_size)
     };
 
     // Collect all type sizes from all compile units
@@ -117,6 +144,7 @@ fn main() -> Result<()> {
         no_function_addresses: args.no_function_addresses || args.minimal,
         no_offsets: args.no_offsets || args.minimal,
         no_function_prototypes: args.no_function_prototypes || args.minimal,
+        pointer_size,
     };
 
     for cu in &compile_units {

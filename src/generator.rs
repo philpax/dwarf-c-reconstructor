@@ -4,13 +4,26 @@ use crate::types::*;
 use cpp_demangle::Symbol;
 use std::collections::HashMap;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CodeGenConfig {
     #[allow(dead_code)]
     pub shorten_int_types: bool,
     pub no_function_addresses: bool,
     pub no_offsets: bool,
     pub no_function_prototypes: bool,
+    pub pointer_size: u64, // 4 for 32-bit, 8 for 64-bit
+}
+
+impl Default for CodeGenConfig {
+    fn default() -> Self {
+        CodeGenConfig {
+            shorten_int_types: false,
+            no_function_addresses: false,
+            no_offsets: false,
+            no_function_prototypes: false,
+            pointer_size: 4, // Default to 32-bit for backwards compatibility
+        }
+    }
 }
 
 pub struct CodeGenerator {
@@ -103,10 +116,12 @@ impl CodeGenerator {
     }
 
     fn estimate_type_size(&self, type_info: &TypeInfo) -> u64 {
+        let ptr_size = self.config.pointer_size;
+
         // Determine the base element size
         let base_size = if type_info.pointer_count > 0 || type_info.is_function_pointer {
-            // Pointers are 4 bytes (32-bit architecture based on sample output)
-            4
+            // Pointers use architecture-specific size
+            ptr_size
         } else {
             // Calculate size based on base type
             match type_info.base_type.as_str() {
@@ -114,7 +129,14 @@ impl CodeGenerator {
                 "short" | "short int" | "unsigned short" | "signed short"
                 | "short unsigned int" => 2,
                 "int" | "unsigned int" | "signed int" => 4,
-                "long" | "unsigned long" | "signed long" | "long int" | "long unsigned int" => 4, // 32-bit long
+                // long is 4 bytes on 32-bit, but can vary; use pointer size for LP64/LLP64 compat
+                "long" | "unsigned long" | "signed long" | "long int" | "long unsigned int" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 "long long"
                 | "unsigned long long"
                 | "signed long long"
@@ -122,27 +144,87 @@ impl CodeGenerator {
                 | "long long unsigned int" => 8,
                 "float" => 4,
                 "double" => 8,
-                "long double" => 12, // x86 extended precision
+                "long double" => {
+                    if ptr_size == 8 {
+                        16
+                    } else {
+                        12
+                    }
+                } // Architecture dependent
                 "void" => 0,
                 // For GLuint, GLint and similar types (typically typedef to unsigned int / int)
                 s if s.starts_with("GL") => 4,
-                // Common system types (32-bit)
-                "fpos_t" => 4,
-                "time_t" => 4,
-                "size_t" => 4,
-                "ssize_t" => 4,
-                "off_t" => 4,
+                // Platform-dependent types - use pointer size
+                "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => ptr_size,
+                // Other common system types (typically 4 bytes even on 64-bit)
+                "fpos_t" => ptr_size, // Often contains a pointer
+                "time_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "off_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 "pid_t" => 4,
                 "uid_t" => 4,
                 "gid_t" => 4,
-                "suseconds_t" => 4,
-                "clock_t" => 4,
-                "dev_t" => 4,
-                "ino_t" => 4,
+                "suseconds_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "clock_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "dev_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "ino_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 "mode_t" => 4,
-                "nlink_t" => 4,
-                "blksize_t" => 4,
-                "blkcnt_t" => 4,
+                "nlink_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "blksize_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
+                "blkcnt_t" => {
+                    if ptr_size == 8 {
+                        8
+                    } else {
+                        4
+                    }
+                }
                 // Common typedefs from various libraries
                 "INT32" | "UINT32" | "DWORD" => 4,
                 "INT16" | "UINT16" | "WORD" => 2,
@@ -1448,10 +1530,10 @@ impl CodeGenerator {
     }
 
     fn generate_typedef_alias(&mut self, typedef_alias: &TypedefAlias) {
-        let mut decl = format!(
-            "typedef {} {}",
-            typedef_alias.target_type, typedef_alias.name
-        );
+        // Use TypeInfo's to_string with the typedef name to get correct syntax
+        // This handles arrays correctly: typedef int arr_t[10]; (not typedef int [10] arr_t;)
+        let type_str = typedef_alias.target_type.to_string(&typedef_alias.name);
+        let mut decl = format!("typedef {}", type_str);
         decl.push(';');
 
         if let Some(line) = typedef_alias.line {
