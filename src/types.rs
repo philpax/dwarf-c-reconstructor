@@ -52,41 +52,46 @@ impl TypeInfo {
 
         if self.is_function_pointer {
             // Function pointer: return_type (*var_name)(params)
-            if let Some(ret_type) = &self.function_return_type {
-                // Add const for return type if present
-                if ret_type.is_const {
+            // Get return type, defaulting to void if not specified
+            let ret_base_type = self
+                .function_return_type
+                .as_ref()
+                .map(|t| t.base_type.as_str())
+                .unwrap_or("void");
+            let ret_is_const = self
+                .function_return_type
+                .as_ref()
+                .map(|t| t.is_const)
+                .unwrap_or(false);
+
+            // Add const for return type if present
+            if ret_is_const {
+                result.push_str("const ");
+            }
+            result.push_str(ret_base_type);
+            result.push_str(" (");
+            // Function pointers always need at least one asterisk
+            result.push('*');
+            result.push_str(&"*".repeat(self.pointer_count));
+            result.push_str(var_name);
+            result.push_str(")(");
+
+            for (i, param) in self.function_params.iter().enumerate() {
+                if i > 0 {
+                    result.push_str(", ");
+                }
+                // Add const for parameter if present
+                if param.is_const {
                     result.push_str("const ");
                 }
-                result.push_str(&ret_type.base_type);
-                result.push(' ');
-                result.push('(');
-                // Function pointers always need at least one asterisk
-                result.push('*');
-                result.push_str(&"*".repeat(self.pointer_count));
-                result.push_str(var_name);
-                result.push_str(")(");
-
-                for (i, param) in self.function_params.iter().enumerate() {
-                    if i > 0 {
-                        result.push_str(", ");
-                    }
-                    // Add const for parameter if present
-                    if param.is_const {
-                        result.push_str("const ");
-                    }
-                    result.push_str(&param.base_type);
-                    if param.pointer_count > 0 {
-                        result.push(' ');
-                        result.push_str(&"*".repeat(param.pointer_count));
-                    }
+                result.push_str(&param.base_type);
+                if param.pointer_count > 0 {
+                    result.push(' ');
+                    result.push_str(&"*".repeat(param.pointer_count));
                 }
-
-                result.push(')');
-            } else {
-                result.push_str("void (*");
-                result.push_str(var_name);
-                result.push_str(")()");
             }
+
+            result.push(')');
         } else {
             // Add type qualifiers before base type
             if self.is_const {
@@ -161,6 +166,43 @@ pub struct LexicalBlock {
     pub inlined_calls: Vec<InlinedSubroutine>,
     pub labels: Vec<Label>,
     pub line: Option<u64>,
+}
+
+impl LexicalBlock {
+    /// Calculate the minimum line number from all contents of this block (recursively)
+    pub fn min_content_line(&self) -> Option<u64> {
+        let mut min_line: Option<u64> = self.line;
+
+        // Check variables
+        for var in &self.variables {
+            if let Some(line) = var.line {
+                min_line = Some(min_line.map_or(line, |m| m.min(line)));
+            }
+        }
+
+        // Check inlined calls
+        for inlined in &self.inlined_calls {
+            if let Some(line) = inlined.line {
+                min_line = Some(min_line.map_or(line, |m| m.min(line)));
+            }
+        }
+
+        // Check labels
+        for label in &self.labels {
+            if let Some(line) = label.line {
+                min_line = Some(min_line.map_or(line, |m| m.min(line)));
+            }
+        }
+
+        // Check nested blocks recursively
+        for nested in &self.nested_blocks {
+            if let Some(line) = nested.min_content_line() {
+                min_line = Some(min_line.map_or(line, |m| m.min(line)));
+            }
+        }
+
+        min_line
+    }
 }
 
 #[derive(Debug, Clone)]
