@@ -80,7 +80,6 @@ impl CodeGenerator {
         }
     }
 
-    #[allow(dead_code)]
     fn format_type_string(&self, type_info: &TypeInfo, var_name: &str) -> String {
         if !self.config.shorten_int_types {
             return type_info.to_string(var_name);
@@ -254,7 +253,7 @@ impl CodeGenerator {
     }
 
     fn format_member_declaration(&self, var: &Variable) -> String {
-        let mut decl = var.type_info.to_string(&var.name);
+        let mut decl = self.format_type_string(&var.type_info, &var.name);
 
         // Add bitfield specification if present
         if let Some(bit_size) = var.bit_size {
@@ -856,7 +855,8 @@ impl CodeGenerator {
                             var_names.push(name_with_array);
                         }
 
-                        let mut decl = base_type.base_type.clone();
+                        let shortened_base = self.shorten_type_name(&base_type.base_type);
+                        let mut decl = shortened_base;
                         decl.push(' ');
                         decl.push_str(&var_names.join(", "));
                         decls.push((decl, Some(group[0].1)));
@@ -962,7 +962,8 @@ impl CodeGenerator {
                             var_names.push(name_with_array);
                         }
 
-                        let mut decl = base_type.base_type.clone();
+                        let shortened_base = self.shorten_type_name(&base_type.base_type);
+                        let mut decl = shortened_base;
                         decl.push(' ');
                         decl.push_str(&var_names.join(", "));
                         decls.push(decl);
