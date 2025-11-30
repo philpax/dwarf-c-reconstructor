@@ -12,6 +12,7 @@ pub struct CodeGenConfig {
     pub no_offsets: bool,
     pub no_function_prototypes: bool,
     pub pointer_size: u64, // 4 for 32-bit, 8 for 64-bit
+    pub disable_no_line_comment: bool,
 }
 
 impl Default for CodeGenConfig {
@@ -22,6 +23,7 @@ impl Default for CodeGenConfig {
             no_offsets: false,
             no_function_prototypes: false,
             pointer_size: 4, // Default to 32-bit for backwards compatibility
+            disable_no_line_comment: false,
         }
     }
 }
@@ -307,7 +309,8 @@ impl CodeGenerator {
         let mut sorted_elements: Vec<(usize, &Element)> = cu.elements.iter().enumerate().collect();
         sorted_elements.sort_by_key(|(idx, elem)| {
             let line = match elem {
-                Element::Compound(c) => c.line,
+                // For compounds, use typedef_line if available (for typedef sorting)
+                Element::Compound(c) => c.typedef_line.or(c.line),
                 Element::Function(f) => f.line,
                 Element::Variable(v) => v.line,
                 Element::Namespace(ns) => ns.line,
@@ -359,7 +362,8 @@ impl CodeGenerator {
             .collect();
         sorted_elements.sort_by_key(|(idx, elem)| {
             let line = match elem {
-                Element::Compound(c) => c.line,
+                // For compounds, use typedef_line if available (for typedef sorting)
+                Element::Compound(c) => c.typedef_line.or(c.line),
                 Element::Function(f) => f.line,
                 Element::Variable(v) => v.line,
                 Element::Namespace(ns) => ns.line,
@@ -432,6 +436,8 @@ impl CodeGenerator {
 
         if let Some(line) = compound.line {
             opening.push_str(&format!(" //{}", line));
+        } else if !self.config.disable_no_line_comment {
+            opening.push_str(" //No line number");
         }
 
         self.write_line(&opening);
@@ -495,6 +501,8 @@ impl CodeGenerator {
 
             if let Some(line_num) = compound.typedef_line.or(compound.line) {
                 line.push_str(&format!(" //{}", line_num));
+            } else if !self.config.disable_no_line_comment {
+                line.push_str(" //No line number");
             }
 
             // Add size comment
@@ -555,6 +563,8 @@ impl CodeGenerator {
 
             if let Some(line) = compound.line {
                 opening.push_str(&format!(" //{}", line));
+            } else if !self.config.disable_no_line_comment {
+                opening.push_str(" //No line number");
             }
 
             self.write_line(&opening);
@@ -635,6 +645,9 @@ impl CodeGenerator {
         self.write_line(&opening);
 
         // Group members and methods by accessibility
+        // Default accessibility: struct = public, class = private
+        let is_class = compound.compound_type == "class";
+
         let mut public_members: Vec<&Variable> = Vec::new();
         let mut protected_members: Vec<&Variable> = Vec::new();
         let mut private_members: Vec<&Variable> = Vec::new();
@@ -643,8 +656,13 @@ impl CodeGenerator {
             match member.accessibility.as_deref() {
                 Some("protected") => protected_members.push(member),
                 Some("public") => public_members.push(member),
-                // Default to private for classes (no accessibility or "private")
-                _ => private_members.push(member),
+                Some("private") => private_members.push(member),
+                // No accessibility specified - use default based on struct/class
+                None if is_class => private_members.push(member),
+                None => public_members.push(member),
+                // Unknown accessibility - treat as default
+                Some(_) if is_class => private_members.push(member),
+                Some(_) => public_members.push(member),
             }
         }
 
@@ -656,8 +674,13 @@ impl CodeGenerator {
             match method.accessibility.as_deref() {
                 Some("protected") => protected_methods.push(method),
                 Some("public") => public_methods.push(method),
-                // Default to private for classes (no accessibility or "private")
-                _ => private_methods.push(method),
+                Some("private") => private_methods.push(method),
+                // No accessibility specified - use default based on struct/class
+                None if is_class => private_methods.push(method),
+                None => public_methods.push(method),
+                // Unknown accessibility - treat as default
+                Some(_) if is_class => private_methods.push(method),
+                Some(_) => public_methods.push(method),
             }
         }
 
@@ -729,22 +752,43 @@ impl CodeGenerator {
         let has_any_offsets = members.iter().any(|m| m.offset.is_some());
 
         if has_any_offsets {
-            // Sort by line number first, then by offset, maintaining original order for ties
-            let mut vars_with_info: Vec<_> = members
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, v)| v.offset.map(|o| (idx, o, *v)))
-                .collect();
-            vars_with_info.sort_by_key(|(idx, offset, v)| (v.line, *offset, *idx));
+            // Group members by line number, sorting by offset within each line
+            let mut lines: HashMap<Option<u64>, Vec<(&Variable, u64)>> = HashMap::new();
+            let mut no_offset_vars = Vec::new();
 
-            let mut prev_end_offset = None;
+            for member in members {
+                if let Some(offset) = member.offset {
+                    lines.entry(member.line).or_default().push((member, offset));
+                } else {
+                    no_offset_vars.push(*member);
+                }
+            }
 
-            // Output members individually with offset information and padding
-            for (_, offset, var) in vars_with_info {
-                // Detect padding between members
+            // Sort each line's members by offset
+            for vars in lines.values_mut() {
+                vars.sort_by_key(|(_, offset)| *offset);
+            }
+
+            // Sort lines by their first member's offset (for padding detection)
+            let mut sorted_lines: Vec<_> = lines.iter().collect();
+            sorted_lines.sort_by_key(|(_, vars)| vars.first().map(|(_, o)| *o).unwrap_or(0));
+
+            let mut prev_end_offset: Option<u64> = None;
+
+            for (line, vars) in sorted_lines {
+                if vars.is_empty() {
+                    continue;
+                }
+
+                let first_offset = vars[0].1;
+                let last_var = vars.last().unwrap().0;
+                let last_offset = vars.last().unwrap().1;
+                let last_member_size = self.estimate_type_size(&last_var.type_info);
+
+                // Detect padding before this group
                 if let Some(prev_end) = prev_end_offset {
-                    if offset > prev_end {
-                        let padding_bytes = offset - prev_end;
+                    if first_offset > prev_end {
+                        let padding_bytes = first_offset - prev_end;
                         self.write_line(&format!(
                             "// [{} byte{} padding for alignment]",
                             padding_bytes,
@@ -753,32 +797,94 @@ impl CodeGenerator {
                     }
                 }
 
-                let mut decl = self.format_member_declaration(var);
-                decl.push(';');
+                // Group by type compatibility within this line
+                let mut type_groups: Vec<Vec<(&Variable, u64)>> = Vec::new();
 
-                // Add line and offset comments
-                if let Some(line) = var.line {
-                    decl.push_str(&format!(" //{}", line));
+                for (var, offset) in vars {
+                    // Bitfields can't be grouped with other variables
+                    if var.bit_size.is_some() {
+                        type_groups.push(vec![(var, *offset)]);
+                        continue;
+                    }
+
+                    let mut added = false;
+                    for group in &mut type_groups {
+                        // Don't group with bitfields
+                        if group[0].0.bit_size.is_some() {
+                            continue;
+                        }
+                        if self.types_compatible(&group[0].0.type_info, &var.type_info) {
+                            group.push((var, *offset));
+                            added = true;
+                            break;
+                        }
+                    }
+                    if !added {
+                        type_groups.push(vec![(var, *offset)]);
+                    }
                 }
-                // Add offset comment unless disabled
-                if !self.config.no_offsets {
-                    decl.push_str(&format!(" @ offset {}", offset));
+
+                // Generate declarations for this line
+                let mut decls = Vec::new();
+
+                for group in &type_groups {
+                    // Check if this group contains function pointers or bitfields
+                    if group[0].0.type_info.is_function_pointer || group[0].0.bit_size.is_some() {
+                        // Output individually with bitfield info
+                        for (var, offset) in group {
+                            let mut decl = self.format_member_declaration(var);
+                            if let (Some(_bit_size), Some(bit_offset)) =
+                                (var.bit_size, var.bit_offset)
+                            {
+                                decl.push_str(&format!(" [bit offset: {}]", bit_offset));
+                            }
+                            // Store offset for later
+                            decls.push((decl, Some(*offset)));
+                        }
+                    } else {
+                        let base_type = &group[0].0.type_info;
+                        let mut var_names = Vec::new();
+
+                        for (var, _) in group {
+                            let ptr_str = "*".repeat(var.type_info.pointer_count);
+                            let mut name_with_array = format!("{}{}", ptr_str, var.name);
+
+                            for size in &var.type_info.array_sizes {
+                                name_with_array.push_str(&format!("[{}]", size));
+                            }
+
+                            var_names.push(name_with_array);
+                        }
+
+                        let mut decl = base_type.base_type.clone();
+                        decl.push(' ');
+                        decl.push_str(&var_names.join(", "));
+                        decls.push((decl, Some(group[0].1)));
+                    }
                 }
 
-                // Add bit offset comment if it's a bitfield
-                if let (Some(_bit_size), Some(bit_offset)) = (var.bit_size, var.bit_offset) {
-                    decl.push_str(&format!(" [bit offset: {}]", bit_offset));
+                // Output all declarations for this line
+                for (decl, offset) in decls {
+                    let mut full_decl = decl;
+                    full_decl.push(';');
+
+                    if let Some(l) = line {
+                        full_decl.push_str(&format!(" //{}", l));
+                    }
+                    if !self.config.no_offsets {
+                        if let Some(o) = offset {
+                            full_decl.push_str(&format!(" @ offset {}", o));
+                        }
+                    }
+                    self.write_line(&full_decl);
                 }
 
-                self.write_line(&decl);
-
-                // Calculate end offset for next iteration
-                let member_size = self.estimate_type_size(&var.type_info);
-                prev_end_offset = Some(offset + member_size);
+                // Update prev_end_offset based on last member in this line group
+                prev_end_offset = Some(last_offset + last_member_size);
             }
 
             // Output members without offsets at the end
-            for var in members.iter().filter(|v| v.offset.is_none()) {
+            for var in no_offset_vars {
                 let decl = self.format_member_declaration(var);
                 if let Some(line) = var.line {
                     self.write_line_comment(&format!("{};", decl), &line.to_string());
@@ -1046,8 +1152,10 @@ impl CodeGenerator {
 
                 self.indent_level -= 1;
 
-                // Output labels at function level (no indentation within function body)
-                for label in &func.labels {
+                // Output labels at function level (no indentation within function body), sorted by line
+                let mut sorted_labels: Vec<_> = func.labels.iter().collect();
+                sorted_labels.sort_by_key(|l| l.line);
+                for label in sorted_labels {
                     let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
                     self.output
                         .push_str(&format!("{}:{}\n", label.name, line_comment));
@@ -1152,13 +1260,9 @@ impl CodeGenerator {
                 let mut sorted_lines: Vec<_> = param_lines.iter().collect();
                 sorted_lines.sort_by_key(|(line, _)| *line);
 
-                // Check if first params are on the same line as the function
-                let first_params_on_func_line =
-                    !sorted_lines.is_empty() && sorted_lines[0].0 == &func.line;
-
                 for (idx, (line, params_at_line)) in sorted_lines.iter().enumerate() {
-                    // First group: put on same line as function if they share the same line number
-                    if idx == 0 && first_params_on_func_line {
+                    // First group: always put on same line as function name
+                    if idx == 0 {
                         // Put first params on same line as function name
                         for (i, param) in params_at_line.iter().enumerate() {
                             if i > 0 {
@@ -1181,11 +1285,6 @@ impl CodeGenerator {
                             decl.push('\n');
                         }
                     } else {
-                        // First param group NOT on func line needs a newline before it
-                        if idx == 0 && !first_params_on_func_line {
-                            decl.push('\n');
-                        }
-
                         // Subsequent groups: put on new lines with indentation
                         decl.push_str(&self.indent());
                         decl.push_str("        ");
@@ -1255,28 +1354,46 @@ impl CodeGenerator {
         }
 
         // Sort by line number, then by original index for stable sort
-        elements.sort_by_key(|elem| match elem {
-            BodyElement::Variable(v, idx) => (v.line, *idx),
-            BodyElement::InlinedCall(i, idx) => (i.line, *idx),
-            BodyElement::Label(l, idx) => (l.line, *idx),
-            BodyElement::LexicalBlock(b, idx) => (b.line, *idx),
-        });
+        // For lexical blocks, use min_content_line() to sort by the earliest line in the block
+        // Create (sort_key, element) tuples for sorting
+        let mut keyed_elements: Vec<((Option<u64>, usize), BodyElement)> = elements
+            .into_iter()
+            .map(|elem| {
+                let key = match &elem {
+                    BodyElement::Variable(v, idx) => (v.line, *idx),
+                    BodyElement::InlinedCall(i, idx) => (i.line, *idx),
+                    BodyElement::Label(l, idx) => (l.line, *idx),
+                    BodyElement::LexicalBlock(bl, idx) => (bl.min_content_line(), *idx),
+                };
+                (key, elem)
+            })
+            .collect();
+        keyed_elements.sort_by_key(|(key, _)| *key);
 
-        // Generate in sorted order, grouping variables by line
+        // Generate in sorted order, grouping variables and inlined calls by line
         let mut variables_buffer: Vec<&Variable> = Vec::new();
-        let mut last_line: Option<u64> = None;
+        let mut inlined_buffer: Vec<&InlinedSubroutine> = Vec::new();
+        let mut last_var_line: Option<u64> = None;
+        let mut last_inlined_line: Option<u64> = None;
 
-        for element in elements {
+        for (_, element) in keyed_elements {
             match element {
                 BodyElement::Variable(var, _) => {
+                    // Flush inlined calls buffer if we're switching to variables
+                    if !inlined_buffer.is_empty() {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
+                    }
                     // Buffer variables to group them by line
-                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty()
+                    if last_var_line.is_some()
+                        && last_var_line != var.line
+                        && !variables_buffer.is_empty()
                     {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
                     variables_buffer.push(var);
-                    last_line = var.line;
+                    last_var_line = var.line;
                 }
                 BodyElement::InlinedCall(inlined, _) => {
                     // Flush any buffered variables first
@@ -1284,39 +1401,78 @@ impl CodeGenerator {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
-                    let line_comment = inlined
-                        .line
-                        .map(|l| format!(" //{}", l))
-                        .unwrap_or_default();
-                    self.write_line(&format!("{}();{}", inlined.name, line_comment));
-                    last_line = inlined.line;
+                    // Buffer inlined calls to group them by line
+                    if last_inlined_line.is_some()
+                        && last_inlined_line != inlined.line
+                        && !inlined_buffer.is_empty()
+                    {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
+                    }
+                    inlined_buffer.push(inlined);
+                    last_inlined_line = inlined.line;
                 }
                 BodyElement::Label(label, _) => {
-                    // Flush any buffered variables first
+                    // Flush any buffered elements first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
+                    }
+                    if !inlined_buffer.is_empty() {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
                     }
                     let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
                     self.write_line(&format!("{}:{}", label.name, line_comment));
-                    last_line = label.line;
                 }
                 BodyElement::LexicalBlock(block, _) => {
-                    // Flush any buffered variables first
+                    // Flush any buffered elements first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
+                    if !inlined_buffer.is_empty() {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
+                    }
                     self.generate_lexical_block(block);
-                    last_line = block.line;
                 }
             }
         }
 
-        // Flush any remaining buffered variables
+        // Flush any remaining buffered elements
         if !variables_buffer.is_empty() {
             self.generate_variables(&variables_buffer);
         }
+        if !inlined_buffer.is_empty() {
+            self.generate_inlined_calls(&inlined_buffer);
+        }
+    }
+
+    fn generate_inlined_calls(&mut self, inlined_calls: &[&InlinedSubroutine]) {
+        if inlined_calls.is_empty() {
+            return;
+        }
+
+        // All calls in this buffer are on the same line
+        let mut line = String::new();
+        line.push_str(&self.indent());
+
+        for (i, inlined) in inlined_calls.iter().enumerate() {
+            if i > 0 {
+                line.push(' ');
+            }
+            line.push_str(&inlined.name);
+            line.push_str("();");
+        }
+
+        // Add line comment from the first call (they all share the same line)
+        if let Some(l) = inlined_calls[0].line {
+            line.push_str(&format!(" //{}", l));
+        }
+
+        self.output.push_str(&line);
+        self.output.push('\n');
     }
 
     fn generate_variables(&mut self, variables: &[&Variable]) {
@@ -1449,28 +1605,46 @@ impl CodeGenerator {
         }
 
         // Sort by line number, then by original index for stable sort
-        elements.sort_by_key(|elem| match elem {
-            BlockElement::Variable(v, idx) => (v.line, *idx),
-            BlockElement::InlinedCall(i, idx) => (i.line, *idx),
-            BlockElement::Label(l, idx) => (l.line, *idx),
-            BlockElement::NestedBlock(b, idx) => (b.line, *idx),
-        });
+        // For nested blocks, use min_content_line() to sort by the earliest line in the block
+        // Create (sort_key, element) tuples for sorting
+        let mut keyed_elements: Vec<((Option<u64>, usize), BlockElement)> = elements
+            .into_iter()
+            .map(|elem| {
+                let key = match &elem {
+                    BlockElement::Variable(v, idx) => (v.line, *idx),
+                    BlockElement::InlinedCall(i, idx) => (i.line, *idx),
+                    BlockElement::Label(l, idx) => (l.line, *idx),
+                    BlockElement::NestedBlock(bl, idx) => (bl.min_content_line(), *idx),
+                };
+                (key, elem)
+            })
+            .collect();
+        keyed_elements.sort_by_key(|(key, _)| *key);
 
-        // Generate in sorted order, grouping variables by line
+        // Generate in sorted order, grouping variables and inlined calls by line
         let mut variables_buffer: Vec<&Variable> = Vec::new();
-        let mut last_line: Option<u64> = None;
+        let mut inlined_buffer: Vec<&InlinedSubroutine> = Vec::new();
+        let mut last_var_line: Option<u64> = None;
+        let mut last_inlined_line: Option<u64> = None;
 
-        for element in elements {
+        for (_, element) in keyed_elements {
             match element {
                 BlockElement::Variable(var, _) => {
+                    // Flush inlined calls buffer if we're switching to variables
+                    if !inlined_buffer.is_empty() {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
+                    }
                     // Buffer variables to group them by line
-                    if last_line.is_some() && last_line != var.line && !variables_buffer.is_empty()
+                    if last_var_line.is_some()
+                        && last_var_line != var.line
+                        && !variables_buffer.is_empty()
                     {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
                     variables_buffer.push(var);
-                    last_line = var.line;
+                    last_var_line = var.line;
                 }
                 BlockElement::InlinedCall(inlined, _) => {
                     // Flush any buffered variables first
@@ -1478,38 +1652,51 @@ impl CodeGenerator {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
-                    let line_comment = inlined
-                        .line
-                        .map(|l| format!(" //{}", l))
-                        .unwrap_or_default();
-                    self.write_line(&format!("{}();{}", inlined.name, line_comment));
-                    last_line = inlined.line;
+                    // Buffer inlined calls to group them by line
+                    if last_inlined_line.is_some()
+                        && last_inlined_line != inlined.line
+                        && !inlined_buffer.is_empty()
+                    {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
+                    }
+                    inlined_buffer.push(inlined);
+                    last_inlined_line = inlined.line;
                 }
                 BlockElement::Label(label, _) => {
-                    // Flush any buffered variables first
+                    // Flush any buffered elements first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
+                    }
+                    if !inlined_buffer.is_empty() {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
                     }
                     let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
                     self.write_line(&format!("{}:{}", label.name, line_comment));
-                    last_line = label.line;
                 }
                 BlockElement::NestedBlock(nested, _) => {
-                    // Flush any buffered variables first
+                    // Flush any buffered elements first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
                         variables_buffer.clear();
                     }
+                    if !inlined_buffer.is_empty() {
+                        self.generate_inlined_calls(&inlined_buffer);
+                        inlined_buffer.clear();
+                    }
                     self.generate_lexical_block(nested);
-                    last_line = nested.line;
                 }
             }
         }
 
-        // Flush any remaining buffered variables
+        // Flush any remaining buffered elements
         if !variables_buffer.is_empty() {
             self.generate_variables(&variables_buffer);
+        }
+        if !inlined_buffer.is_empty() {
+            self.generate_inlined_calls(&inlined_buffer);
         }
     }
 

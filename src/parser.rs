@@ -75,7 +75,7 @@ fn apply_relocations<'a>(
 pub struct DwarfParser<'a> {
     dwarf: Dwarf<DwarfReader<'a>>,
     type_cache: HashMap<usize, TypeInfo>,
-    typedef_map: HashMap<usize, (String, Option<u64>)>,
+    typedef_map: HashMap<usize, (String, Option<u64>, Option<u64>)>, // (name, line, decl_file)
     abstract_origins: HashMap<usize, String>,
     // Keep the relocated section data alive in stable heap allocations
     _section_data: Vec<Box<[u8]>>,
@@ -315,10 +315,12 @@ impl<'a> DwarfParser<'a> {
             if entry.tag() == gimli::DW_TAG_typedef {
                 if let Some(name) = self.get_string_attr(unit, entry, gimli::DW_AT_name) {
                     let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
+                    let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
                     if let Some(type_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
                         // Convert to absolute offset
                         let abs_type_offset = unit_base + type_offset;
-                        self.typedef_map.insert(abs_type_offset, (name, line));
+                        self.typedef_map
+                            .insert(abs_type_offset, (name, line, decl_file));
                     }
                 }
             }
@@ -658,9 +660,19 @@ impl<'a> DwarfParser<'a> {
             .unwrap_or(0);
         let abs_offset = unit_base + offset_val;
 
+        // Only merge typedef if it's in the same file as the struct
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&abs_offset) {
-                (true, Some(tname.clone()), *tline)
+            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&abs_offset) {
+                // Only merge if same file or if either file is None
+                let same_file = match (decl_file, typedef_file) {
+                    (Some(a), Some(b)) => a == *b,
+                    _ => true, // If either is unknown, assume same file
+                };
+                if same_file {
+                    (true, Some(tname.clone()), *tline)
+                } else {
+                    (false, None, None)
+                }
             } else {
                 (false, None, None)
             };
@@ -702,9 +714,19 @@ impl<'a> DwarfParser<'a> {
             .unwrap_or(0);
         let abs_offset = unit_base + offset_val;
 
+        // Only merge typedef if it's in the same file as the enum
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&abs_offset) {
-                (true, Some(tname.clone()), *tline)
+            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&abs_offset) {
+                // Only merge if same file or if either file is None
+                let same_file = match (decl_file, typedef_file) {
+                    (Some(a), Some(b)) => a == *b,
+                    _ => true,
+                };
+                if same_file {
+                    (true, Some(tname.clone()), *tline)
+                } else {
+                    (false, None, None)
+                }
             } else {
                 (false, None, None)
             };
@@ -818,11 +840,19 @@ impl<'a> DwarfParser<'a> {
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
         let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
-        // Check if typedef
+        // Check if typedef - only merge if in same file
         let offset = entry.offset().0;
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&offset) {
-                (true, Some(tname.clone()), *tline)
+            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&offset) {
+                let same_file = match (decl_file, typedef_file) {
+                    (Some(a), Some(b)) => a == *b,
+                    _ => true,
+                };
+                if same_file {
+                    (true, Some(tname.clone()), *tline)
+                } else {
+                    (false, None, None)
+                }
             } else {
                 (false, None, None)
             };
@@ -933,11 +963,19 @@ impl<'a> DwarfParser<'a> {
         let byte_size = self.get_u64_attr(entry, gimli::DW_AT_byte_size);
         let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
-        // Check if typedef
+        // Check if typedef - only merge if in same file
         let offset = entry.offset().0;
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline)) = self.typedef_map.get(&offset) {
-                (true, Some(tname.clone()), *tline)
+            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&offset) {
+                let same_file = match (decl_file, typedef_file) {
+                    (Some(a), Some(b)) => a == *b,
+                    _ => true,
+                };
+                if same_file {
+                    (true, Some(tname.clone()), *tline)
+                } else {
+                    (false, None, None)
+                }
             } else {
                 (false, None, None)
             };
@@ -1644,7 +1682,7 @@ impl<'a> DwarfParser<'a> {
 
                     // Check if it has a typedef
                     let offset = entry.offset().0;
-                    if let Some((typedef_name, _)) = self.typedef_map.get(&offset) {
+                    if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
                         Ok(TypeInfo::new(typedef_name.clone()))
                     } else {
                         Ok(TypeInfo::new(format!("{}{}", prefix, n)))
@@ -1652,7 +1690,7 @@ impl<'a> DwarfParser<'a> {
                 } else {
                     // Anonymous type, check for typedef
                     let offset = entry.offset().0;
-                    if let Some((typedef_name, _)) = self.typedef_map.get(&offset) {
+                    if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
                         Ok(TypeInfo::new(typedef_name.clone()))
                     } else {
                         Ok(TypeInfo::new("void".to_string()))

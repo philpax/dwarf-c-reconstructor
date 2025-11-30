@@ -105,6 +105,10 @@ struct Args {
     /// Enable all --no-* options (minimal output with no addresses, offsets, or prototypes)
     #[arg(long)]
     minimal: bool,
+
+    /// Disable "//No line number" comments for elements without line numbers
+    #[arg(long)]
+    disable_no_line_comment: bool,
 }
 
 fn main() -> Result<()> {
@@ -138,13 +142,14 @@ fn main() -> Result<()> {
     fs::create_dir_all(output_dir)?;
 
     // Create config from command-line args
-    // If --minimal is set, enable all --no-* options
+    // If --minimal is set, enable all --no-* options and shorten_int_types
     let config = CodeGenConfig {
-        shorten_int_types: args.shorten_int_types,
+        shorten_int_types: args.shorten_int_types || args.minimal,
         no_function_addresses: args.no_function_addresses || args.minimal,
         no_offsets: args.no_offsets || args.minimal,
         no_function_prototypes: args.no_function_prototypes || args.minimal,
         pointer_size,
+        disable_no_line_comment: args.disable_no_line_comment,
     };
 
     for cu in &compile_units {
