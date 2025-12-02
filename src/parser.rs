@@ -1458,7 +1458,8 @@ impl<'a> DwarfParser<'a> {
     }
 
     /// Parse a typedef entry and return a TypedefAlias if it points to another typedef or base type
-    /// (not a struct/class/union/enum, which are handled via merging)
+    /// For struct/class/union/enum, only create TypedefAlias if the typedef is in a different file
+    /// (same-file typedefs are handled via merging with the compound definition)
     fn parse_typedef_alias(
         &mut self,
         unit: &DwarfUnit,
@@ -1483,14 +1484,26 @@ impl<'a> DwarfParser<'a> {
         let mut entries = unit.entries_at_offset(unit_offset)?;
 
         if let Some((_, type_entry)) = entries.next_dfs()? {
-            // Check if the target is a struct/class/union/enum - these are handled by merging
+            // Check if the target is a struct/class/union/enum
             match type_entry.tag() {
                 gimli::DW_TAG_structure_type
                 | gimli::DW_TAG_class_type
                 | gimli::DW_TAG_union_type
                 | gimli::DW_TAG_enumeration_type => {
-                    // These are handled by the typedef_map merging, skip them
-                    return Ok(None);
+                    // Get the target type's decl_file to check if merge will happen
+                    let target_decl_file = self.get_u64_attr(type_entry, gimli::DW_AT_decl_file);
+
+                    // Check if typedef and target are in the same file (merge will happen)
+                    let same_file = match (decl_file, target_decl_file) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true, // If either is unknown, assume same file (merge will happen)
+                    };
+
+                    if same_file {
+                        // Same file - these are handled by the typedef_map merging, skip them
+                        return Ok(None);
+                    }
+                    // Different files - the merge won't happen, so create a TypedefAlias
                 }
                 _ => {}
             }

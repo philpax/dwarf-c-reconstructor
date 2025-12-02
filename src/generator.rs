@@ -684,12 +684,13 @@ impl CodeGenerator {
         }
 
         // Write sections - access specifiers at same indent level as class
-        if !private_members.is_empty() || !private_methods.is_empty() {
-            self.write_line("private:");
+        // Order: public, protected, private (conventional C++ style)
+        if !public_members.is_empty() || !public_methods.is_empty() {
+            self.write_line("public:");
             self.indent_level += 1;
-            self.generate_members(private_members.to_vec().as_slice());
+            self.generate_members(public_members.to_vec().as_slice());
             // Sort methods by line number
-            let mut sorted_methods: Vec<(usize, &Function)> = private_methods
+            let mut sorted_methods: Vec<(usize, &Function)> = public_methods
                 .iter()
                 .enumerate()
                 .map(|(i, &f)| (i, f))
@@ -718,12 +719,12 @@ impl CodeGenerator {
             self.indent_level -= 1;
         }
 
-        if !public_members.is_empty() || !public_methods.is_empty() {
-            self.write_line("public:");
+        if !private_members.is_empty() || !private_methods.is_empty() {
+            self.write_line("private:");
             self.indent_level += 1;
-            self.generate_members(public_members.to_vec().as_slice());
+            self.generate_members(private_members.to_vec().as_slice());
             // Sort methods by line number
-            let mut sorted_methods: Vec<(usize, &Function)> = public_methods
+            let mut sorted_methods: Vec<(usize, &Function)> = private_methods
                 .iter()
                 .enumerate()
                 .map(|(i, &f)| (i, f))
@@ -989,25 +990,10 @@ impl CodeGenerator {
     }
 
     fn generate_method(&mut self, func: &Function) {
-        if !func.has_body
-            || (func.variables.is_empty()
-                && func.lexical_blocks.is_empty()
-                && func.inlined_calls.is_empty()
-                && func.labels.is_empty())
-        {
-            // Method declaration only - need to build declaration without embedded line comment
-            // so we can put semicolon before the comment
-            let decl = self.generate_method_declaration(func);
-            self.write_line(&decl);
-        } else {
-            let decl = self.generate_function_declaration(func);
-            self.write_line(&decl);
-            self.write_line("{");
-            self.indent_level += 1;
-            self.generate_function_body(func);
-            self.indent_level -= 1;
-            self.write_line("}");
-        }
+        // Inside a class definition, always output declaration-only format
+        // Method definitions are output as top-level functions with ClassName:: prefix
+        let decl = self.generate_method_declaration(func);
+        self.write_line(&decl);
     }
 
     fn generate_method_declaration(&self, func: &Function) -> String {
@@ -1021,10 +1007,11 @@ impl CodeGenerator {
             decl.push_str("virtual ");
         }
 
-        // Return type (skip for constructors/destructors)
+        // Return type (skip for constructors/destructors, apply type shortening)
         if !is_constructor && !func.is_destructor {
-            decl.push_str(&func.return_type.base_type);
+            decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
             if func.return_type.pointer_count > 0 {
+                decl.push_str(" ");
                 decl.push_str(&"*".repeat(func.return_type.pointer_count));
             }
             decl.push(' ');
@@ -1045,7 +1032,7 @@ impl CodeGenerator {
             if i > 0 {
                 decl.push_str(", ");
             }
-            decl.push_str(&param.type_info.to_string(&param.name));
+            decl.push_str(&self.format_type_string(&param.type_info, &param.name));
         }
         decl.push_str(");");
 
@@ -1136,41 +1123,12 @@ impl CodeGenerator {
         } else {
             self.write_line(&decl);
 
-            // Check if we have a single lexical block at top level with only labels (no other variables/inlined calls)
-            // In this case, we output the block contents directly without extra braces,
-            // and labels are at function indentation level
-            let single_block_with_labels = func.lexical_blocks.len() == 1
-                && func.variables.is_empty()
-                && func.inlined_calls.is_empty();
-
-            if single_block_with_labels {
-                // Use function braces to contain the block's content, with labels outside at function level
-                self.write_line("{");
-                self.indent_level += 1;
-
-                // Output the lexical block's contents (without its own braces)
-                self.generate_lexical_block_contents(&func.lexical_blocks[0]);
-
-                self.indent_level -= 1;
-
-                // Output labels at function level (no indentation within function body), sorted by line
-                let mut sorted_labels: Vec<_> = func.labels.iter().collect();
-                sorted_labels.sort_by_key(|l| l.line);
-                for label in sorted_labels {
-                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-                    self.output
-                        .push_str(&format!("{}:{}\n", label.name, line_comment));
-                }
-
-                self.write_line("}");
-            } else {
-                // Add our own braces
-                self.write_line("{");
-                self.indent_level += 1;
-                self.generate_function_body(func);
-                self.indent_level -= 1;
-                self.write_line("}");
-            }
+            // Add our own braces
+            self.write_line("{");
+            self.indent_level += 1;
+            self.generate_function_body(func);
+            self.indent_level -= 1;
+            self.write_line("}")
         }
     }
 
@@ -1188,12 +1146,18 @@ impl CodeGenerator {
             decl.push_str("inline ");
         }
 
-        // Return type
-        decl.push_str(&func.return_type.base_type);
-        if func.return_type.pointer_count > 0 {
-            decl.push_str(&"*".repeat(func.return_type.pointer_count));
+        // Detect constructor: name matches class name
+        let is_constructor = func.class_name.as_ref() == Some(&func.name);
+
+        // Return type (skip for constructors/destructors, apply type shortening)
+        if !is_constructor && !func.is_destructor {
+            decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
+            if func.return_type.pointer_count > 0 {
+                decl.push_str(" ");
+                decl.push_str(&"*".repeat(func.return_type.pointer_count));
+            }
+            decl.push(' ');
         }
-        decl.push(' ');
 
         // Function name (with class prefix for method definitions)
         if func.is_method {
@@ -1235,7 +1199,7 @@ impl CodeGenerator {
                     if i > 0 {
                         decl.push_str(", ");
                     }
-                    decl.push_str(&param.type_info.to_string(&param.name));
+                    decl.push_str(&self.format_type_string(&param.type_info, &param.name));
                 }
                 decl.push(')');
                 if let Some(line) = func.line {
@@ -1269,7 +1233,7 @@ impl CodeGenerator {
                             if i > 0 {
                                 decl.push_str(", ");
                             }
-                            decl.push_str(&param.type_info.to_string(&param.name));
+                            decl.push_str(&self.format_type_string(&param.type_info, &param.name));
                         }
 
                         if sorted_lines.len() == 1 {
@@ -1294,7 +1258,7 @@ impl CodeGenerator {
                             if i > 0 {
                                 decl.push_str(", ");
                             }
-                            decl.push_str(&param.type_info.to_string(&param.name));
+                            decl.push_str(&self.format_type_string(&param.type_info, &param.name));
                         }
 
                         if idx == sorted_lines.len() - 1 {
@@ -1423,8 +1387,10 @@ impl CodeGenerator {
                         self.generate_inlined_calls(&inlined_buffer);
                         inlined_buffer.clear();
                     }
+                    // Labels are output at column 0 (no indentation) - standard C style
                     let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-                    self.write_line(&format!("{}:{}", label.name, line_comment));
+                    self.output
+                        .push_str(&format!("{}:{}\n", label.name, line_comment));
                 }
                 BodyElement::LexicalBlock(block, _) => {
                     // Flush any buffered elements first
@@ -1518,7 +1484,7 @@ impl CodeGenerator {
                 if group[0].type_info.is_function_pointer {
                     // Output function pointers individually
                     for var in group {
-                        let decl = var.type_info.to_string(&var.name);
+                        let decl = self.format_type_string(&var.type_info, &var.name);
                         decls.push(decl);
                     }
                 } else {
@@ -1529,7 +1495,7 @@ impl CodeGenerator {
                     if has_const_values {
                         // Output individually with const values
                         for var in group {
-                            let mut decl = var.type_info.to_string(&var.name);
+                            let mut decl = self.format_type_string(&var.type_info, &var.name);
                             if let Some(ref const_val) = var.const_value {
                                 decl.push_str(" = ");
                                 match const_val {
@@ -1554,7 +1520,9 @@ impl CodeGenerator {
                             var_names.push(name_with_array);
                         }
 
-                        let mut decl = base_type.base_type.clone();
+                        // Apply type shortening to the base type
+                        let shortened_base = self.shorten_type_name(&base_type.base_type);
+                        let mut decl = shortened_base;
                         decl.push(' ');
                         decl.push_str(&var_names.join(", "));
                         decls.push(decl);
@@ -1568,7 +1536,10 @@ impl CodeGenerator {
 
         // Variables without line numbers
         for var in no_line_vars {
-            self.write_line(&format!("{};", var.type_info.to_string(&var.name)));
+            self.write_line(&format!(
+                "{};",
+                self.format_type_string(&var.type_info, &var.name)
+            ));
         }
     }
 
@@ -1674,8 +1645,10 @@ impl CodeGenerator {
                         self.generate_inlined_calls(&inlined_buffer);
                         inlined_buffer.clear();
                     }
+                    // Labels are output at column 0 (no indentation) - standard C style
                     let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-                    self.write_line(&format!("{}:{}", label.name, line_comment));
+                    self.output
+                        .push_str(&format!("{}:{}\n", label.name, line_comment));
                 }
                 BlockElement::NestedBlock(nested, _) => {
                     // Flush any buffered elements first
@@ -1702,7 +1675,7 @@ impl CodeGenerator {
     }
 
     fn generate_global_variable(&mut self, var: &Variable) {
-        let mut decl = var.type_info.to_string(&var.name);
+        let mut decl = self.format_type_string(&var.type_info, &var.name);
 
         // Add const value if present
         if let Some(ref const_val) = var.const_value {
@@ -1718,9 +1691,9 @@ impl CodeGenerator {
     }
 
     fn generate_typedef_alias(&mut self, typedef_alias: &TypedefAlias) {
-        // Use TypeInfo's to_string with the typedef name to get correct syntax
+        // Use format_type_string for correct syntax with type shortening
         // This handles arrays correctly: typedef int arr_t[10]; (not typedef int [10] arr_t;)
-        let type_str = typedef_alias.target_type.to_string(&typedef_alias.name);
+        let type_str = self.format_type_string(&typedef_alias.target_type, &typedef_alias.name);
         let mut decl = format!("typedef {}", type_str);
         decl.push(';');
 
