@@ -663,10 +663,11 @@ impl<'a> DwarfParser<'a> {
         // Only merge typedef if it's in the same file as the struct
         let (is_typedef, typedef_name, typedef_line) =
             if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&abs_offset) {
-                // Only merge if same file or if either file is None
+                // Only merge if BOTH have known file and they match
+                // This prevents forward declaration typedefs from appearing in every file
                 let same_file = match (decl_file, typedef_file) {
                     (Some(a), Some(b)) => a == *b,
-                    _ => true, // If either is unknown, assume same file
+                    _ => false, // If either is unknown, don't merge to avoid duplication
                 };
                 if same_file {
                     (true, Some(tname.clone()), *tline)
@@ -717,10 +718,11 @@ impl<'a> DwarfParser<'a> {
         // Only merge typedef if it's in the same file as the enum
         let (is_typedef, typedef_name, typedef_line) =
             if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&abs_offset) {
-                // Only merge if same file or if either file is None
+                // Only merge if BOTH have known file and they match
+                // This prevents forward declaration typedefs from appearing in every file
                 let same_file = match (decl_file, typedef_file) {
                     (Some(a), Some(b)) => a == *b,
-                    _ => true,
+                    _ => false, // If either is unknown, don't merge to avoid duplication
                 };
                 if same_file {
                     (true, Some(tname.clone()), *tline)
@@ -844,9 +846,11 @@ impl<'a> DwarfParser<'a> {
         let offset = entry.offset().0;
         let (is_typedef, typedef_name, typedef_line) =
             if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&offset) {
+                // Only merge if BOTH have known file and they match
+                // This prevents forward declaration typedefs from appearing in every file
                 let same_file = match (decl_file, typedef_file) {
                     (Some(a), Some(b)) => a == *b,
-                    _ => true,
+                    _ => false, // If either is unknown, don't merge to avoid duplication
                 };
                 if same_file {
                     (true, Some(tname.clone()), *tline)
@@ -967,9 +971,11 @@ impl<'a> DwarfParser<'a> {
         let offset = entry.offset().0;
         let (is_typedef, typedef_name, typedef_line) =
             if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&offset) {
+                // Only merge if BOTH have known file and they match
+                // This prevents forward declaration typedefs from appearing in every file
                 let same_file = match (decl_file, typedef_file) {
                     (Some(a), Some(b)) => a == *b,
-                    _ => true,
+                    _ => false, // If either is unknown, don't merge to avoid duplication
                 };
                 if same_file {
                     (true, Some(tname.clone()), *tline)
@@ -1484,32 +1490,81 @@ impl<'a> DwarfParser<'a> {
         let mut entries = unit.entries_at_offset(unit_offset)?;
 
         if let Some((_, type_entry)) = entries.next_dfs()? {
-            // Check if the target is a struct/class/union/enum
-            match type_entry.tag() {
-                gimli::DW_TAG_structure_type
-                | gimli::DW_TAG_class_type
-                | gimli::DW_TAG_union_type
-                | gimli::DW_TAG_enumeration_type => {
-                    // Get the target type's decl_file to check if merge will happen
-                    let target_decl_file = self.get_u64_attr(type_entry, gimli::DW_AT_decl_file);
+            // Follow typedef chains to find the ultimate target type
+            let mut current_offset = type_offset;
+            let mut max_depth = 20; // Prevent infinite loops
 
-                    // Check if typedef and target are in the same file (merge will happen)
-                    let same_file = match (decl_file, target_decl_file) {
-                        (Some(a), Some(b)) => a == b,
-                        _ => true, // If either is unknown, assume same file (merge will happen)
-                    };
+            loop {
+                let unit_offset = gimli::UnitOffset(current_offset);
+                let mut current_entries = unit.entries_at_offset(unit_offset)?;
 
-                    if same_file {
-                        // Same file - these are handled by the typedef_map merging, skip them
-                        return Ok(None);
+                if let Some((_, current_entry)) = current_entries.next_dfs()? {
+                    match current_entry.tag() {
+                        gimli::DW_TAG_typedef => {
+                            // Follow the typedef chain
+                            if let Some(next_offset) =
+                                self.get_ref_attr(unit, current_entry, gimli::DW_AT_type)
+                            {
+                                current_offset = next_offset;
+                                max_depth -= 1;
+                                if max_depth == 0 {
+                                    break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                        gimli::DW_TAG_structure_type
+                        | gimli::DW_TAG_class_type
+                        | gimli::DW_TAG_union_type
+                        | gimli::DW_TAG_enumeration_type => {
+                            // Found the ultimate struct/class/union/enum target
+                            // Get the target type's decl_file to check if merge will happen
+                            let target_decl_file =
+                                self.get_u64_attr(current_entry, gimli::DW_AT_decl_file);
+
+                            // Check if typedef and target are in the same file (merge will happen)
+                            let same_file = match (decl_file, target_decl_file) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => true, // If either is unknown, assume same file (merge will happen)
+                            };
+
+                            if same_file {
+                                // Same file - these are handled by the typedef_map merging, skip them
+                                return Ok(None);
+                            }
+                            // Different files - the merge won't happen
+                            // However, for forward declarations (typedefs to struct/class/union/enum
+                            // where the struct is defined elsewhere), we skip creating TypedefAlias
+                            // because:
+                            // 1. The struct will be generated with its own typedef in its decl_file
+                            // 2. Creating TypedefAlias here would cause duplication across CUs
+                            // 3. Forward declarations like "typedef struct X Y;" are redundant when
+                            //    the struct X is already typedef'd as Y in its definition file
+                            return Ok(None);
+                        }
+                        _ => break, // Other types (base types, pointers, etc.) - proceed normally
                     }
-                    // Different files - the merge won't happen, so create a TypedefAlias
+                } else {
+                    break;
                 }
-                _ => {}
             }
 
             // Resolve the type
             let target_type = self.resolve_type_entry(unit, type_entry)?;
+
+            // Skip typedefs to struct/class/union/enum types to avoid duplication
+            // These are forward declarations that would be redundant since the actual
+            // struct definition will have its own typedef
+            // Check if the base_type starts with a compound type keyword
+            let base = target_type.base_type.as_str();
+            if base.starts_with("struct ")
+                || base.starts_with("class ")
+                || base.starts_with("union ")
+                || base.starts_with("enum ")
+            {
+                return Ok(None);
+            }
 
             Ok(Some(TypedefAlias {
                 name,

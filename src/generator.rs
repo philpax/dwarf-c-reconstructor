@@ -1011,7 +1011,7 @@ impl CodeGenerator {
         if !is_constructor && !func.is_destructor {
             decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
             if func.return_type.pointer_count > 0 {
-                decl.push_str(" ");
+                decl.push(' ');
                 decl.push_str(&"*".repeat(func.return_type.pointer_count));
             }
             decl.push(' ');
@@ -1153,7 +1153,7 @@ impl CodeGenerator {
         if !is_constructor && !func.is_destructor {
             decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
             if func.return_type.pointer_count > 0 {
-                decl.push_str(" ");
+                decl.push(' ');
                 decl.push_str(&"*".repeat(func.return_type.pointer_count));
             }
             decl.push(' ');
@@ -1295,11 +1295,18 @@ impl CodeGenerator {
     }
 
     fn generate_function_body(&mut self, func: &Function) {
-        // Collect all elements with their indices for stable sorting
+        // Collect all function-level labels sorted by line number
+        // These need to be interleaved with all content (including inside lexical blocks)
+        let mut pending_labels: std::collections::VecDeque<&Label> =
+            func.labels.iter().collect::<Vec<_>>().into_iter().collect();
+        pending_labels
+            .make_contiguous()
+            .sort_by_key(|l| (l.line, l.name.as_str()));
+
+        // Collect non-label elements with their indices for stable sorting
         enum BodyElement<'a> {
             Variable(&'a Variable, usize),
             InlinedCall(&'a InlinedSubroutine, usize),
-            Label(&'a Label, usize),
             LexicalBlock(&'a LexicalBlock, usize),
         }
 
@@ -1311,23 +1318,18 @@ impl CodeGenerator {
         for (idx, inlined) in func.inlined_calls.iter().enumerate() {
             elements.push(BodyElement::InlinedCall(inlined, idx));
         }
-        for (idx, label) in func.labels.iter().enumerate() {
-            elements.push(BodyElement::Label(label, idx));
-        }
         for (idx, block) in func.lexical_blocks.iter().enumerate() {
             elements.push(BodyElement::LexicalBlock(block, idx));
         }
 
         // Sort by line number, then by original index for stable sort
         // For lexical blocks, use min_content_line() to sort by the earliest line in the block
-        // Create (sort_key, element) tuples for sorting
         let mut keyed_elements: Vec<((Option<u64>, usize), BodyElement)> = elements
             .into_iter()
             .map(|elem| {
                 let key = match &elem {
                     BodyElement::Variable(v, idx) => (v.line, *idx),
                     BodyElement::InlinedCall(i, idx) => (i.line, *idx),
-                    BodyElement::Label(l, idx) => (l.line, *idx),
                     BodyElement::LexicalBlock(bl, idx) => (bl.min_content_line(), *idx),
                 };
                 (key, elem)
@@ -1344,6 +1346,8 @@ impl CodeGenerator {
         for (_, element) in keyed_elements {
             match element {
                 BodyElement::Variable(var, _) => {
+                    // Output any pending labels that come before this variable
+                    self.output_pending_labels_before(&mut pending_labels, var.line);
                     // Flush inlined calls buffer if we're switching to variables
                     if !inlined_buffer.is_empty() {
                         self.generate_inlined_calls(&inlined_buffer);
@@ -1361,6 +1365,8 @@ impl CodeGenerator {
                     last_var_line = var.line;
                 }
                 BodyElement::InlinedCall(inlined, _) => {
+                    // Output any pending labels that come before this inlined call
+                    self.output_pending_labels_before(&mut pending_labels, inlined.line);
                     // Flush any buffered variables first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
@@ -1377,22 +1383,13 @@ impl CodeGenerator {
                     inlined_buffer.push(inlined);
                     last_inlined_line = inlined.line;
                 }
-                BodyElement::Label(label, _) => {
-                    // Flush any buffered elements first
-                    if !variables_buffer.is_empty() {
-                        self.generate_variables(&variables_buffer);
-                        variables_buffer.clear();
-                    }
-                    if !inlined_buffer.is_empty() {
-                        self.generate_inlined_calls(&inlined_buffer);
-                        inlined_buffer.clear();
-                    }
-                    // Labels are output at column 0 (no indentation) - standard C style
-                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-                    self.output
-                        .push_str(&format!("{}:{}\n", label.name, line_comment));
-                }
                 BodyElement::LexicalBlock(block, _) => {
+                    // Output any pending labels that come before this lexical block
+                    // (labels with line numbers less than the block's minimum content line)
+                    self.output_pending_labels_before(
+                        &mut pending_labels,
+                        block.min_content_line(),
+                    );
                     // Flush any buffered elements first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
@@ -1402,7 +1399,8 @@ impl CodeGenerator {
                         self.generate_inlined_calls(&inlined_buffer);
                         inlined_buffer.clear();
                     }
-                    self.generate_lexical_block(block);
+                    // Pass remaining pending labels to the lexical block so it can interleave them
+                    self.generate_lexical_block_with_labels(block, &mut pending_labels);
                 }
             }
         }
@@ -1413,6 +1411,37 @@ impl CodeGenerator {
         }
         if !inlined_buffer.is_empty() {
             self.generate_inlined_calls(&inlined_buffer);
+        }
+
+        // Output any remaining labels at the end
+        while let Some(label) = pending_labels.pop_front() {
+            let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+            self.output
+                .push_str(&format!("{}:{}\n", label.name, line_comment));
+        }
+    }
+
+    /// Output any pending labels that should appear before the given line number
+    fn output_pending_labels_before(
+        &mut self,
+        pending_labels: &mut std::collections::VecDeque<&Label>,
+        before_line: Option<u64>,
+    ) {
+        while let Some(label) = pending_labels.front() {
+            // Check if this label should come before the current element
+            match (label.line, before_line) {
+                (Some(label_line), Some(elem_line)) if label_line < elem_line => {
+                    let label = pending_labels.pop_front().unwrap();
+                    self.output
+                        .push_str(&format!("{}: //{}\n", label.name, label_line));
+                }
+                (None, _) => {
+                    // Labels without line numbers go at the start
+                    let label = pending_labels.pop_front().unwrap();
+                    self.output.push_str(&format!("{}:\n", label.name));
+                }
+                _ => break, // Label should not come before this element
+            }
         }
     }
 
@@ -1543,21 +1572,35 @@ impl CodeGenerator {
         }
     }
 
-    fn generate_lexical_block(&mut self, block: &LexicalBlock) {
+    fn generate_lexical_block_with_labels(
+        &mut self,
+        block: &LexicalBlock,
+        pending_labels: &mut std::collections::VecDeque<&Label>,
+    ) {
         self.write_line("{");
         self.indent_level += 1;
-        self.generate_lexical_block_contents(block);
+        self.generate_lexical_block_contents_with_labels(block, pending_labels);
         self.indent_level -= 1;
         self.write_line("}");
     }
 
-    /// Generate the contents of a lexical block without the surrounding braces
-    fn generate_lexical_block_contents(&mut self, block: &LexicalBlock) {
-        // Collect all elements with their indices for stable sorting
+    /// Generate the contents of a lexical block, interleaving pending labels from parent scope
+    fn generate_lexical_block_contents_with_labels(
+        &mut self,
+        block: &LexicalBlock,
+        pending_labels: &mut std::collections::VecDeque<&Label>,
+    ) {
+        // Collect block-level labels and merge with pending function-level labels
+        let mut all_labels: std::collections::VecDeque<&Label> = block.labels.iter().collect();
+        // Sort block labels
+        all_labels
+            .make_contiguous()
+            .sort_by_key(|l| (l.line, l.name.as_str()));
+
+        // Collect non-label elements with their indices for stable sorting
         enum BlockElement<'a> {
             Variable(&'a Variable, usize),
             InlinedCall(&'a InlinedSubroutine, usize),
-            Label(&'a Label, usize),
             NestedBlock(&'a LexicalBlock, usize),
         }
 
@@ -1569,23 +1612,17 @@ impl CodeGenerator {
         for (idx, inlined) in block.inlined_calls.iter().enumerate() {
             elements.push(BlockElement::InlinedCall(inlined, idx));
         }
-        for (idx, label) in block.labels.iter().enumerate() {
-            elements.push(BlockElement::Label(label, idx));
-        }
         for (idx, nested) in block.nested_blocks.iter().enumerate() {
             elements.push(BlockElement::NestedBlock(nested, idx));
         }
 
         // Sort by line number, then by original index for stable sort
-        // For nested blocks, use min_content_line() to sort by the earliest line in the block
-        // Create (sort_key, element) tuples for sorting
         let mut keyed_elements: Vec<((Option<u64>, usize), BlockElement)> = elements
             .into_iter()
             .map(|elem| {
                 let key = match &elem {
                     BlockElement::Variable(v, idx) => (v.line, *idx),
                     BlockElement::InlinedCall(i, idx) => (i.line, *idx),
-                    BlockElement::Label(l, idx) => (l.line, *idx),
                     BlockElement::NestedBlock(bl, idx) => (bl.min_content_line(), *idx),
                 };
                 (key, elem)
@@ -1602,6 +1639,9 @@ impl CodeGenerator {
         for (_, element) in keyed_elements {
             match element {
                 BlockElement::Variable(var, _) => {
+                    // Output any pending labels (function-level and block-level) before this variable
+                    self.output_pending_labels_before(pending_labels, var.line);
+                    self.output_pending_labels_before(&mut all_labels, var.line);
                     // Flush inlined calls buffer if we're switching to variables
                     if !inlined_buffer.is_empty() {
                         self.generate_inlined_calls(&inlined_buffer);
@@ -1619,6 +1659,9 @@ impl CodeGenerator {
                     last_var_line = var.line;
                 }
                 BlockElement::InlinedCall(inlined, _) => {
+                    // Output any pending labels before this inlined call
+                    self.output_pending_labels_before(pending_labels, inlined.line);
+                    self.output_pending_labels_before(&mut all_labels, inlined.line);
                     // Flush any buffered variables first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
@@ -1635,22 +1678,10 @@ impl CodeGenerator {
                     inlined_buffer.push(inlined);
                     last_inlined_line = inlined.line;
                 }
-                BlockElement::Label(label, _) => {
-                    // Flush any buffered elements first
-                    if !variables_buffer.is_empty() {
-                        self.generate_variables(&variables_buffer);
-                        variables_buffer.clear();
-                    }
-                    if !inlined_buffer.is_empty() {
-                        self.generate_inlined_calls(&inlined_buffer);
-                        inlined_buffer.clear();
-                    }
-                    // Labels are output at column 0 (no indentation) - standard C style
-                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
-                    self.output
-                        .push_str(&format!("{}:{}\n", label.name, line_comment));
-                }
                 BlockElement::NestedBlock(nested, _) => {
+                    // Output any pending labels that come before this nested block
+                    self.output_pending_labels_before(pending_labels, nested.min_content_line());
+                    self.output_pending_labels_before(&mut all_labels, nested.min_content_line());
                     // Flush any buffered elements first
                     if !variables_buffer.is_empty() {
                         self.generate_variables(&variables_buffer);
@@ -1660,7 +1691,8 @@ impl CodeGenerator {
                         self.generate_inlined_calls(&inlined_buffer);
                         inlined_buffer.clear();
                     }
-                    self.generate_lexical_block(nested);
+                    // Pass remaining pending labels to nested block
+                    self.generate_lexical_block_with_labels(nested, pending_labels);
                 }
             }
         }
@@ -1671,6 +1703,13 @@ impl CodeGenerator {
         }
         if !inlined_buffer.is_empty() {
             self.generate_inlined_calls(&inlined_buffer);
+        }
+
+        // Output any remaining block-level labels
+        while let Some(label) = all_labels.pop_front() {
+            let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+            self.output
+                .push_str(&format!("{}:{}\n", label.name, line_comment));
         }
     }
 
