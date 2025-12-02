@@ -223,10 +223,18 @@ fn main() -> Result<()> {
             main_elements.extend(elems.iter().copied());
         }
 
+        // Add elements with decl_file = 0 (some DWARF producers use 0 for the CU file)
+        if let Some(elems) = elements_by_file.get(&Some(0)) {
+            main_elements.extend(elems.iter().copied());
+        }
+
         // Add elements declared in the compile unit's own file
         if let Some(cu_idx) = cu_file_index {
-            if let Some(elems) = elements_by_file.get(&Some(cu_idx)) {
-                main_elements.extend(elems.iter().copied());
+            // Avoid double-counting if cu_idx is 0
+            if cu_idx != 0 {
+                if let Some(elems) = elements_by_file.get(&Some(cu_idx)) {
+                    main_elements.extend(elems.iter().copied());
+                }
             }
         }
 
