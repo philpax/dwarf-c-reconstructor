@@ -203,28 +203,38 @@ impl<'a> DwarfParser<'a> {
             bool,
             Option<u64>,
             Option<u64>,
+            Option<u64>, // line from definition
         );
 
-        // Build a map of linkage names to cloned function data
-        let mut definitions: HashMap<String, MethodDefinition> = HashMap::new();
+        // Build maps of definitions:
+        // 1. By linkage name (for methods that have it on both declaration and definition)
+        // 2. By specification offset (for methods that use DW_AT_specification)
+        let mut definitions_by_linkage: HashMap<String, MethodDefinition> = HashMap::new();
+        let mut definitions_by_spec_offset: HashMap<usize, MethodDefinition> = HashMap::new();
 
         for element in elements.iter() {
             if let Element::Function(func) = element {
-                if !func.is_method {
-                    if let Some(ref linkage_name) = func.linkage_name {
-                        definitions.insert(
-                            linkage_name.clone(),
-                            (
-                                func.parameters.clone(),
-                                func.variables.clone(),
-                                func.lexical_blocks.clone(),
-                                func.inlined_calls.clone(),
-                                func.labels.clone(),
-                                func.has_body,
-                                func.low_pc,
-                                func.high_pc,
-                            ),
-                        );
+                let definition_data = (
+                    func.parameters.clone(),
+                    func.variables.clone(),
+                    func.lexical_blocks.clone(),
+                    func.inlined_calls.clone(),
+                    func.labels.clone(),
+                    func.has_body,
+                    func.low_pc,
+                    func.high_pc,
+                    func.line,
+                );
+
+                // If this function has a specification_offset, it's a definition referencing a declaration
+                if let Some(spec_offset) = func.specification_offset {
+                    definitions_by_spec_offset.insert(spec_offset, definition_data.clone());
+                }
+
+                // Also index by linkage name for backwards compatibility
+                if let Some(ref linkage_name) = func.linkage_name {
+                    if !func.is_method || func.specification_offset.is_some() {
+                        definitions_by_linkage.insert(linkage_name.clone(), definition_data);
                     }
                 }
             }
@@ -235,7 +245,8 @@ impl<'a> DwarfParser<'a> {
             match element {
                 Element::Compound(compound) => {
                     for method in &mut compound.methods {
-                        if let Some(ref linkage_name) = method.linkage_name {
+                        // First try to match by decl_offset (specification_offset on definition points to this)
+                        let matched = if let Some(decl_offset) = method.decl_offset {
                             if let Some((
                                 params,
                                 vars,
@@ -245,9 +256,10 @@ impl<'a> DwarfParser<'a> {
                                 has_body,
                                 low_pc,
                                 high_pc,
-                            )) = definitions.get(linkage_name)
+                                line,
+                            )) = definitions_by_spec_offset.get(&decl_offset)
                             {
-                                // Found matching definition, copy parameters and body info
+                                // Found matching definition by specification offset
                                 method.parameters = params.clone();
                                 method.variables = vars.clone();
                                 method.lexical_blocks = blocks.clone();
@@ -256,6 +268,46 @@ impl<'a> DwarfParser<'a> {
                                 method.has_body = *has_body;
                                 method.low_pc = *low_pc;
                                 method.high_pc = *high_pc;
+                                // Use line from definition if declaration doesn't have one
+                                if method.line.is_none() {
+                                    method.line = *line;
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        // Fall back to linkage name matching if specification matching didn't work
+                        if !matched {
+                            if let Some(ref linkage_name) = method.linkage_name {
+                                if let Some((
+                                    params,
+                                    vars,
+                                    blocks,
+                                    inlined,
+                                    labels,
+                                    has_body,
+                                    low_pc,
+                                    high_pc,
+                                    line,
+                                )) = definitions_by_linkage.get(linkage_name)
+                                {
+                                    // Found matching definition by linkage name
+                                    method.parameters = params.clone();
+                                    method.variables = vars.clone();
+                                    method.lexical_blocks = blocks.clone();
+                                    method.inlined_calls = inlined.clone();
+                                    method.labels = labels.clone();
+                                    method.has_body = *has_body;
+                                    method.low_pc = *low_pc;
+                                    method.high_pc = *high_pc;
+                                    if method.line.is_none() {
+                                        method.line = *line;
+                                    }
+                                }
                             }
                         }
                     }
@@ -267,29 +319,58 @@ impl<'a> DwarfParser<'a> {
             }
         }
 
-        // Mark top-level functions that are method definitions
-        let mut method_linkage_names: HashMap<String, String> = HashMap::new();
-        for element in elements.iter() {
-            if let Element::Compound(compound) = element {
-                if let Some(ref class_name) = compound.name {
-                    for method in &compound.methods {
-                        if let Some(ref linkage_name) = method.linkage_name {
-                            method_linkage_names.insert(linkage_name.clone(), class_name.clone());
+        // Build mapping from decl_offset to class name for marking top-level functions
+        let mut class_by_decl_offset: HashMap<usize, String> = HashMap::new();
+        let mut class_by_linkage: HashMap<String, String> = HashMap::new();
+
+        fn collect_class_methods(
+            elements: &[Element],
+            class_by_decl_offset: &mut HashMap<usize, String>,
+            class_by_linkage: &mut HashMap<String, String>,
+        ) {
+            for element in elements.iter() {
+                match element {
+                    Element::Compound(compound) => {
+                        if let Some(ref class_name) = compound.name {
+                            for method in &compound.methods {
+                                if let Some(decl_offset) = method.decl_offset {
+                                    class_by_decl_offset.insert(decl_offset, class_name.clone());
+                                }
+                                if let Some(ref linkage_name) = method.linkage_name {
+                                    class_by_linkage
+                                        .insert(linkage_name.clone(), class_name.clone());
+                                }
+                            }
                         }
                     }
+                    Element::Namespace(ns) => {
+                        collect_class_methods(&ns.children, class_by_decl_offset, class_by_linkage);
+                    }
+                    _ => {}
                 }
             }
         }
 
+        collect_class_methods(elements, &mut class_by_decl_offset, &mut class_by_linkage);
+
+        // Mark top-level functions that are method definitions and set their class_name
         for element in elements.iter_mut() {
             if let Element::Function(func) = element {
-                if !func.is_method {
-                    if let Some(ref linkage_name) = func.linkage_name {
-                        if let Some(class_name) = method_linkage_names.get(linkage_name) {
-                            // Mark this function as a method and set its class name
-                            func.is_method = true;
-                            func.class_name = Some(class_name.clone());
-                        }
+                // If the function doesn't have a class_name yet, try to find it
+                if func.class_name.is_none() {
+                    // Try to match by specification_offset first, then by linkage_name
+                    let class_name = func
+                        .specification_offset
+                        .and_then(|offset| class_by_decl_offset.get(&offset).cloned())
+                        .or_else(|| {
+                            func.linkage_name
+                                .as_ref()
+                                .and_then(|name| class_by_linkage.get(name).cloned())
+                        });
+
+                    if let Some(class_name) = class_name {
+                        func.is_method = true;
+                        func.class_name = Some(class_name);
                     }
                 }
             }
@@ -755,20 +836,88 @@ impl<'a> DwarfParser<'a> {
         let mut entries = unit.entries_at_offset(offset)?;
         let (_, entry) = entries.next_dfs()?.unwrap();
 
-        let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
-            Some(n) => n,
-            None => return Ok(None),
+        // Get the unit base for absolute offset calculation
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+
+        // Check for DW_AT_specification - this indicates a method definition
+        // that refers back to a declaration inside a class
+        let specification_offset = self.get_ref_attr(unit, entry, gimli::DW_AT_specification);
+
+        let (
+            name,
+            return_type,
+            accessibility,
+            is_virtual_from_spec,
+            linkage_name_from_spec,
+            spec_abs_offset,
+        ) = if let Some(spec_offset) = specification_offset {
+            // Follow the specification to get name, return_type, etc from the declaration
+            let spec_unit_offset = gimli::UnitOffset(spec_offset);
+            let mut spec_entries = unit.entries_at_offset(spec_unit_offset)?;
+
+            if let Some((_, spec_entry)) = spec_entries.next_dfs()? {
+                let name = match self.get_string_attr(unit, spec_entry, gimli::DW_AT_name) {
+                    Some(n) => n,
+                    None => return Ok(None),
+                };
+                let return_type = self.resolve_type(unit, spec_entry)?;
+                let accessibility = self.get_accessibility(spec_entry);
+                let is_virtual = self.get_bool_attr(spec_entry, gimli::DW_AT_virtuality);
+                let linkage_name = self
+                    .get_string_attr(unit, spec_entry, gimli::DW_AT_linkage_name)
+                    .or_else(|| {
+                        self.get_string_attr(unit, spec_entry, gimli::DW_AT_MIPS_linkage_name)
+                    });
+                let abs_offset = unit_base + spec_offset;
+                (
+                    name,
+                    return_type,
+                    accessibility,
+                    is_virtual,
+                    linkage_name,
+                    Some(abs_offset),
+                )
+            } else {
+                return Ok(None);
+            }
+        } else {
+            // No specification - get name directly from entry
+            let name = match self.get_string_attr(unit, entry, gimli::DW_AT_name) {
+                Some(n) => n,
+                None => return Ok(None),
+            };
+
+            let is_declaration = self.get_bool_attr(entry, gimli::DW_AT_declaration);
+            if is_declaration && !is_method {
+                return Ok(None);
+            }
+
+            let return_type = self.resolve_type(unit, entry)?;
+            let accessibility = self.get_accessibility(entry);
+            let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
+            let linkage_name = self
+                .get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
+                .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
+            (
+                name,
+                return_type,
+                accessibility,
+                is_virtual,
+                linkage_name,
+                None,
+            )
         };
 
         let is_declaration = self.get_bool_attr(entry, gimli::DW_AT_declaration);
-        if is_declaration && !is_method {
-            return Ok(None);
-        }
+        // If we have a specification, this is a definition (has body)
+        let has_body = specification_offset.is_some() || !is_declaration;
 
         let line = self.get_u64_attr(entry, gimli::DW_AT_decl_line);
-        let return_type = self.resolve_type(unit, entry)?;
-        let accessibility = self.get_accessibility(entry);
-        let has_body = !is_declaration;
         let low_pc = self.get_u64_attr(entry, gimli::DW_AT_low_pc);
         let mut high_pc = self.get_u64_attr(entry, gimli::DW_AT_high_pc);
 
@@ -783,17 +932,23 @@ impl<'a> DwarfParser<'a> {
 
         let is_inline = self.get_u64_attr(entry, gimli::DW_AT_inline).is_some();
         let is_external = self.get_bool_attr(entry, gimli::DW_AT_external);
-        let is_virtual = self.get_bool_attr(entry, gimli::DW_AT_virtuality);
+        // Use virtual flag from specification if we have one, otherwise from entry
+        let is_virtual = is_virtual_from_spec || self.get_bool_attr(entry, gimli::DW_AT_virtuality);
+        // Prefer linkage name from entry, fall back to one from specification
         let linkage_name = self
             .get_string_attr(unit, entry, gimli::DW_AT_linkage_name)
-            .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name));
+            .or_else(|| self.get_string_attr(unit, entry, gimli::DW_AT_MIPS_linkage_name))
+            .or(linkage_name_from_spec);
         let is_artificial = self.get_bool_attr(entry, gimli::DW_AT_artificial);
         let decl_file = self.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Destructor detection by name (~ prefix)
-        let is_destructor = is_method && name.starts_with('~');
+        let is_destructor = name.starts_with('~');
         // Constructor detection will happen during generation when we have class name
         let is_constructor = false;
+
+        // If we have a specification, this is a method definition
+        let effective_is_method = is_method || spec_abs_offset.is_some();
 
         self.parse_function_children(
             unit,
@@ -803,7 +958,7 @@ impl<'a> DwarfParser<'a> {
             return_type,
             accessibility,
             has_body,
-            is_method,
+            effective_is_method,
             low_pc,
             high_pc,
             is_inline,
@@ -813,6 +968,8 @@ impl<'a> DwarfParser<'a> {
             is_destructor,
             linkage_name,
             is_artificial,
+            spec_abs_offset, // specification_offset
+            None,            // decl_offset (only for declarations)
             &mut entries,
         )
     }
@@ -1196,6 +1353,21 @@ impl<'a> DwarfParser<'a> {
         // Constructor detection will happen during generation when we have class name
         let is_constructor = false;
 
+        // Get the unit base for absolute offset calculation
+        let unit_base = unit
+            .header
+            .offset()
+            .as_debug_info_offset()
+            .map(|o| o.0)
+            .unwrap_or(0);
+
+        // For method declarations, store their absolute offset so definitions can reference them
+        let decl_offset = if is_method && is_declaration {
+            Some(unit_base + entry.offset().0)
+        } else {
+            None
+        };
+
         self.parse_function_children(
             unit,
             name,
@@ -1214,6 +1386,8 @@ impl<'a> DwarfParser<'a> {
             is_destructor,
             linkage_name,
             is_artificial,
+            None, // specification_offset (this function is for declarations, not definitions)
+            decl_offset,
             entries,
         )
     }
@@ -1237,6 +1411,8 @@ impl<'a> DwarfParser<'a> {
         is_destructor: bool,
         linkage_name: Option<String>,
         is_artificial: bool,
+        specification_offset: Option<usize>,
+        decl_offset: Option<usize>,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Function>> {
         let mut parameters = Vec::new();
@@ -1317,6 +1493,8 @@ impl<'a> DwarfParser<'a> {
             linkage_name,
             is_artificial,
             decl_file,
+            specification_offset,
+            decl_offset,
         }))
     }
 
