@@ -1123,12 +1123,48 @@ impl CodeGenerator {
         } else {
             self.write_line(&decl);
 
-            // Add our own braces
-            self.write_line("{");
-            self.indent_level += 1;
-            self.generate_function_body(func);
-            self.indent_level -= 1;
-            self.write_line("}")
+            // Check if we have a single lexical block at top level with no other variables/inlined calls
+            // In this case, we output the block contents directly without extra braces,
+            // since the lexical block provides the necessary braces
+            let single_block_only = func.lexical_blocks.len() == 1
+                && func.variables.is_empty()
+                && func.inlined_calls.is_empty();
+
+            if single_block_only {
+                // Use function braces to contain the block's content (without the lexical block's own braces)
+                self.write_line("{");
+                self.indent_level += 1;
+
+                // Set up label queue for interleaving
+                let mut pending_labels: std::collections::VecDeque<&Label> =
+                    func.labels.iter().collect::<Vec<_>>().into_iter().collect();
+                pending_labels
+                    .make_contiguous()
+                    .sort_by_key(|l| (l.line, l.name.as_str()));
+
+                // Output the lexical block's contents directly (without its own braces)
+                self.generate_lexical_block_contents_with_labels(
+                    &func.lexical_blocks[0],
+                    &mut pending_labels,
+                );
+
+                // Output any remaining labels at the end
+                while let Some(label) = pending_labels.pop_front() {
+                    let line_comment = label.line.map(|l| format!(" //{}", l)).unwrap_or_default();
+                    self.output
+                        .push_str(&format!("{}:{}\n", label.name, line_comment));
+                }
+
+                self.indent_level -= 1;
+                self.write_line("}");
+            } else {
+                // Add our own braces
+                self.write_line("{");
+                self.indent_level += 1;
+                self.generate_function_body(func);
+                self.indent_level -= 1;
+                self.write_line("}")
+            }
         }
     }
 
