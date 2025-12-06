@@ -1519,6 +1519,19 @@ impl<'a> DwarfParser<'a> {
                         | gimli::DW_TAG_union_type
                         | gimli::DW_TAG_enumeration_type => {
                             // Found the ultimate struct/class/union/enum target
+                            // Check if this is a forward declaration (only has DW_AT_declaration)
+                            let is_forward_decl =
+                                self.get_bool_attr(current_entry, gimli::DW_AT_declaration);
+
+                            if is_forward_decl {
+                                // This is a forward declaration - the actual struct definition
+                                // is elsewhere, so we need to generate the TypedefAlias.
+                                // The typedef_map merging will happen in the file where the
+                                // actual struct is defined, not here.
+                                break;
+                            }
+
+                            // This is an actual struct definition (not forward declaration)
                             // Get the target type's decl_file to check if merge will happen
                             let target_decl_file =
                                 self.get_u64_attr(current_entry, gimli::DW_AT_decl_file);
@@ -1533,15 +1546,9 @@ impl<'a> DwarfParser<'a> {
                                 // Same file - these are handled by the typedef_map merging, skip them
                                 return Ok(None);
                             }
-                            // Different files - the merge won't happen
-                            // However, for forward declarations (typedefs to struct/class/union/enum
-                            // where the struct is defined elsewhere), we skip creating TypedefAlias
-                            // because:
-                            // 1. The struct will be generated with its own typedef in its decl_file
-                            // 2. Creating TypedefAlias here would cause duplication across CUs
-                            // 3. Forward declarations like "typedef struct X Y;" are redundant when
-                            //    the struct X is already typedef'd as Y in its definition file
-                            return Ok(None);
+                            // Different files - generate the TypedefAlias since the merge
+                            // happens in the struct's definition file, not here
+                            break;
                         }
                         _ => break, // Other types (base types, pointers, etc.) - proceed normally
                     }
@@ -1550,21 +1557,17 @@ impl<'a> DwarfParser<'a> {
                 }
             }
 
-            // Resolve the type
-            let target_type = self.resolve_type_entry(unit, type_entry)?;
+            // Resolve the type without typedef substitution to get the raw underlying type
+            // (e.g., "struct tag_mpFace" instead of "mpFace")
+            let target_type = self.resolve_type_entry_raw(unit, type_entry)?;
 
-            // Skip typedefs to struct/class/union/enum types to avoid duplication
-            // These are forward declarations that would be redundant since the actual
-            // struct definition will have its own typedef
-            // Check if the base_type starts with a compound type keyword
-            let base = target_type.base_type.as_str();
-            if base.starts_with("struct ")
-                || base.starts_with("class ")
-                || base.starts_with("union ")
-                || base.starts_with("enum ")
-            {
-                return Ok(None);
-            }
+            // Note: We no longer skip typedefs to compound types here.
+            // The loop above already handles deduplication by returning Ok(None)
+            // when the typedef will be merged with the struct definition in the same file.
+            // If we reach here, it means either:
+            // 1. The typedef points to a forward declaration (struct defined elsewhere)
+            // 2. The typedef is in a different file from the struct definition
+            // In both cases, we need to generate the TypedefAlias.
 
             Ok(Some(TypedefAlias {
                 name,
@@ -1617,6 +1620,25 @@ impl<'a> DwarfParser<'a> {
         &mut self,
         unit: &DwarfUnit,
         entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Result<TypeInfo> {
+        self.resolve_type_entry_impl(unit, entry, true)
+    }
+
+    /// Resolve a type entry without typedef substitution for compound types.
+    /// Used when we need the raw underlying type (e.g., for generating typedef aliases).
+    fn resolve_type_entry_raw(
+        &mut self,
+        unit: &DwarfUnit,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+    ) -> Result<TypeInfo> {
+        self.resolve_type_entry_impl(unit, entry, false)
+    }
+
+    fn resolve_type_entry_impl(
+        &mut self,
+        unit: &DwarfUnit,
+        entry: &DebuggingInformationEntry<DwarfReader>,
+        use_typedef_substitution: bool,
     ) -> Result<TypeInfo> {
         match entry.tag() {
             gimli::DW_TAG_base_type => {
@@ -1748,21 +1770,23 @@ impl<'a> DwarfParser<'a> {
                         _ => "",
                     };
 
-                    // Check if it has a typedef
-                    let offset = entry.offset().0;
-                    if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
-                        Ok(TypeInfo::new(typedef_name.clone()))
-                    } else {
-                        Ok(TypeInfo::new(format!("{}{}", prefix, n)))
+                    // Check if it has a typedef (only if substitution is enabled)
+                    if use_typedef_substitution {
+                        let offset = entry.offset().0;
+                        if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
+                            return Ok(TypeInfo::new(typedef_name.clone()));
+                        }
                     }
+                    Ok(TypeInfo::new(format!("{}{}", prefix, n)))
                 } else {
-                    // Anonymous type, check for typedef
-                    let offset = entry.offset().0;
-                    if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
-                        Ok(TypeInfo::new(typedef_name.clone()))
-                    } else {
-                        Ok(TypeInfo::new("void".to_string()))
+                    // Anonymous type, check for typedef (only if substitution is enabled)
+                    if use_typedef_substitution {
+                        let offset = entry.offset().0;
+                        if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
+                            return Ok(TypeInfo::new(typedef_name.clone()));
+                        }
                     }
+                    Ok(TypeInfo::new("void".to_string()))
                 }
             }
             gimli::DW_TAG_subroutine_type => {
