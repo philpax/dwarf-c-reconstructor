@@ -12,11 +12,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  trigger-release:
+  prepare-release:
     name: Update version and push
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,3 +50,10 @@ jobs:
           git tag "${{ steps.version.outputs.tag }}"
           git push
           git push origin "${{ steps.version.outputs.tag }}"
+
+  release:
+    name: Release
+    needs: prepare-release
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.prepare-release.outputs.tag }}
