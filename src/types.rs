@@ -86,7 +86,6 @@ impl TypeInfo {
                 }
                 result.push_str(&param.base_type);
                 if param.pointer_count > 0 {
-                    result.push(' ');
                     result.push_str(&"*".repeat(param.pointer_count));
                 }
             }
@@ -104,17 +103,17 @@ impl TypeInfo {
                 result.push_str("restrict ");
             }
             result.push_str(&self.base_type);
-            result.push(' ');
 
-            // References and pointers
+            // References and pointers (attached to type, no space before)
             if self.is_rvalue_reference {
                 result.push_str("&&");
             } else if self.is_reference {
                 result.push('&');
-            } else {
+            } else if self.pointer_count > 0 {
                 result.push_str(&"*".repeat(self.pointer_count));
             }
 
+            result.push(' ');
             result.push_str(var_name);
 
             for size in &self.array_sizes {
