@@ -231,3 +231,119 @@ fn test_archive_file() {
     // Cleanup
     let _ = fs::remove_dir_all(output_dir);
 }
+
+#[test]
+fn test_class_method_parameters() {
+    // Test that method parameters from definitions are correctly associated with declarations
+    let test_cpp = "/tmp/test_method_params.cpp";
+    let test_obj = "/tmp/test_method_params.o";
+    let output_dir = "/tmp/test_method_params_output";
+
+    // C++ code with class method declarations (no params) and definitions (with params)
+    // This tests the DW_AT_specification linking
+    let cpp_code = r#"
+class MyClass {
+public:
+    int value;
+    MyClass();
+    ~MyClass();
+    int add(int a, int b);
+    void setData(const char *name, int size);
+};
+
+MyClass::MyClass() : value(0) {}
+
+MyClass::~MyClass() {}
+
+int MyClass::add(int a, int b) {
+    return a + b;
+}
+
+void MyClass::setData(const char *name, int size) {
+    // use params to avoid warnings
+    (void)name;
+    (void)size;
+}
+"#;
+
+    fs::write(test_cpp, cpp_code).expect("Failed to write test file");
+
+    // Compile with debug info
+    let compile = Command::new("g++")
+        .args(["-g", "-c", test_cpp, "-o", test_obj])
+        .output();
+
+    if compile.is_err() || !compile.as_ref().unwrap().status.success() {
+        eprintln!("g++ not available or compilation failed, skipping test");
+        let _ = fs::remove_file(test_cpp);
+        return;
+    }
+
+    let _ = fs::remove_dir_all(output_dir);
+
+    let output = Command::new("cargo")
+        .args(["run", "--", test_obj, "-o", output_dir])
+        .output()
+        .expect("Failed to execute dwarf-c-reconstructor");
+
+    assert!(
+        output.status.success(),
+        "dwarf-c-reconstructor failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Find the generated .cpp file (may be in subdirectories)
+    fn find_cpp_files(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut result = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    result.extend(find_cpp_files(&path));
+                } else if path.extension().is_some_and(|ext| ext == "cpp") {
+                    result.push(path);
+                }
+            }
+        }
+        result
+    }
+
+    let generated_files = find_cpp_files(Path::new(output_dir));
+
+    assert!(!generated_files.is_empty(), "No .cpp files were generated");
+
+    let generated_path = &generated_files[0];
+    let content = fs::read_to_string(generated_path).expect("Failed to read generated file");
+
+    // Check that the class declaration has method parameters
+    // Note: the parameters should be on the method declarations inside the class
+    assert!(
+        content.contains("int add(int a, int b)") || content.contains("int add(int, int)"),
+        "add method should have parameters in class declaration. Content:\n{}",
+        content
+    );
+
+    assert!(
+        content.contains("setData(const char") || content.contains("setData(char"),
+        "setData method should have const char* parameter in class declaration. Content:\n{}",
+        content
+    );
+
+    // Check that method definitions are generated with class:: prefix
+    assert!(
+        content.contains("MyClass::add(") || content.contains("MyClass::add "),
+        "Method definitions should have MyClass:: prefix. Content:\n{}",
+        content
+    );
+
+    assert!(
+        content.contains("MyClass::setData(") || content.contains("MyClass::setData "),
+        "setData definition should have MyClass:: prefix. Content:\n{}",
+        content
+    );
+
+    // Cleanup
+    let _ = fs::remove_file(test_cpp);
+    let _ = fs::remove_file(test_obj);
+    let _ = fs::remove_dir_all(output_dir);
+}

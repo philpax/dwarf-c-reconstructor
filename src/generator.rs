@@ -1021,11 +1021,23 @@ impl CodeGenerator {
         decl.push_str(&func.name);
         decl.push('(');
 
-        // Parameters (skip 'this' without line number for methods - these are implicit)
+        // Parameters - filter out:
+        // 1. 'this' without line number for methods (implicit this pointer)
+        // 2. Compiler-generated parameters (e.g., __in_chrg for destructors, __vtt_parm)
         let params: Vec<_> = func
             .parameters
             .iter()
-            .filter(|p| !(p.name == "this" && p.line.is_none()))
+            .filter(|p| {
+                // Skip 'this' without line number
+                if p.name == "this" && p.line.is_none() {
+                    return false;
+                }
+                // Skip compiler-generated parameters (names starting with __)
+                if p.name.starts_with("__") && p.line.is_none() {
+                    return false;
+                }
+                true
+            })
             .collect();
 
         for (i, param) in params.iter().enumerate() {
@@ -1205,11 +1217,23 @@ impl CodeGenerator {
         decl.push_str(&func.name);
         decl.push('(');
 
-        // Parameters (skip 'this' without line number for methods - these are implicit)
+        // Parameters - filter out:
+        // 1. 'this' without line number for methods (implicit this pointer)
+        // 2. Compiler-generated parameters (e.g., __in_chrg for destructors, __vtt_parm)
         let params: Vec<_> = func
             .parameters
             .iter()
-            .filter(|p| !(p.name == "this" && p.line.is_none()))
+            .filter(|p| {
+                // Skip 'this' without line number
+                if p.name == "this" && p.line.is_none() {
+                    return false;
+                }
+                // Skip compiler-generated parameters (names starting with __)
+                if p.name.starts_with("__") && p.line.is_none() {
+                    return false;
+                }
+                true
+            })
             .collect();
 
         if params.is_empty() {

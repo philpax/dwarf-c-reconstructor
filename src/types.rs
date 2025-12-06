@@ -235,6 +235,8 @@ pub struct Function {
     pub linkage_name: Option<String>,
     pub is_artificial: bool,
     pub decl_file: Option<u64>, // File index from DWARF file table
+    pub specification_offset: Option<usize>, // Absolute offset of the declaration this definition refers to
+    pub decl_offset: Option<usize>,          // Absolute offset of this declaration (for matching)
 }
 
 #[derive(Debug, Clone)]
