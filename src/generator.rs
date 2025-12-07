@@ -734,8 +734,8 @@ impl CodeGenerator {
         }
 
         // Group members and methods by accessibility
-        // Default accessibility: struct = public, class = private
-        let is_class = compound.compound_type == "class";
+        // Default accessibility: public (when DW_AT_accessibility is not present)
+        // Values: 1=public, 2=protected, 3=private
 
         let mut public_members: Vec<&Variable> = Vec::new();
         let mut protected_members: Vec<&Variable> = Vec::new();
@@ -746,12 +746,8 @@ impl CodeGenerator {
                 Some("protected") => protected_members.push(member),
                 Some("public") => public_members.push(member),
                 Some("private") => private_members.push(member),
-                // No accessibility specified - use default based on struct/class
-                None if is_class => private_members.push(member),
-                None => public_members.push(member),
-                // Unknown accessibility - treat as default
-                Some(_) if is_class => private_members.push(member),
-                Some(_) => public_members.push(member),
+                // No accessibility specified or unknown - default to public
+                None | Some(_) => public_members.push(member),
             }
         }
 
@@ -764,12 +760,8 @@ impl CodeGenerator {
                 Some("protected") => protected_methods.push(method),
                 Some("public") => public_methods.push(method),
                 Some("private") => private_methods.push(method),
-                // No accessibility specified - use default based on struct/class
-                None if is_class => private_methods.push(method),
-                None => public_methods.push(method),
-                // Unknown accessibility - treat as default
-                Some(_) if is_class => private_methods.push(method),
-                Some(_) => public_methods.push(method),
+                // No accessibility specified or unknown - default to public
+                None | Some(_) => public_methods.push(method),
             }
         }
 
