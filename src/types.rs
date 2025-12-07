@@ -305,7 +305,7 @@ pub struct InlinedSubroutine {
     pub line: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)] // is_constructor field is used during generation, not read from struct
 pub struct Function {
     pub name: String,
@@ -342,7 +342,7 @@ pub struct BaseClass {
     pub is_virtual: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Compound {
     pub name: Option<String>,
     pub compound_type: String, // "struct", "union", "enum", "class"
@@ -359,7 +359,7 @@ pub struct Compound {
     pub decl_file: Option<u64>, // File index from DWARF file table
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Namespace {
     pub name: String,
     pub line: Option<u64>,
@@ -368,7 +368,7 @@ pub struct Namespace {
 
 /// A typedef that points to another type (not a struct/class/union/enum)
 /// Used for cases like `typedef mpVector2 CharaPoint;`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypedefAlias {
     pub name: String,
     pub target_type: TypeInfo,
@@ -376,7 +376,7 @@ pub struct TypedefAlias {
     pub decl_file: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Element {
     Compound(Compound),
     Function(Function),
