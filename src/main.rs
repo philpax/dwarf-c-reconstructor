@@ -12,6 +12,7 @@ use parser::DwarfParser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use types::{Element, Namespace};
 
 /// Parse a single object file's DWARF data
 fn parse_object_file(data: &[u8]) -> Result<Vec<types::CompileUnit>> {
@@ -111,6 +112,197 @@ struct Args {
     disable_no_line_comment: bool,
 }
 
+/// Get the decl_file for an element (recursively checks namespace children)
+fn get_element_decl_file(element: &Element) -> Option<u64> {
+    match element {
+        Element::Compound(c) => c.decl_file,
+        Element::Function(f) => f.decl_file,
+        Element::Variable(v) => v.decl_file,
+        Element::Namespace(_) => None, // Namespaces themselves don't have decl_file
+        Element::TypedefAlias(t) => t.decl_file,
+    }
+}
+
+/// Information about a namespace element split by decl_file
+struct NamespaceByFile {
+    /// The original namespace name
+    name: String,
+    /// The original namespace line
+    line: Option<u64>,
+    /// Children grouped by their decl_file
+    children_by_file: HashMap<Option<u64>, Vec<Element>>,
+}
+
+/// Split namespace children by their decl_file values
+fn split_namespace_by_file(ns: &Namespace) -> NamespaceByFile {
+    let mut children_by_file: HashMap<Option<u64>, Vec<Element>> = HashMap::new();
+
+    for child in &ns.children {
+        let decl_file = get_element_decl_file(child);
+
+        // For nested namespaces, recursively split them
+        if let Element::Namespace(nested_ns) = child {
+            let nested_split = split_namespace_by_file(nested_ns);
+            for (file, nested_children) in nested_split.children_by_file {
+                if !nested_children.is_empty() {
+                    // Create a new namespace containing just the children for this file
+                    let filtered_ns = Namespace {
+                        name: nested_split.name.clone(),
+                        line: nested_split.line,
+                        children: nested_children,
+                    };
+                    children_by_file
+                        .entry(file)
+                        .or_default()
+                        .push(Element::Namespace(filtered_ns));
+                }
+            }
+        } else {
+            // Clone the element for each file it belongs to
+            children_by_file
+                .entry(decl_file)
+                .or_default()
+                .push(clone_element(child));
+        }
+    }
+
+    NamespaceByFile {
+        name: ns.name.clone(),
+        line: ns.line,
+        children_by_file,
+    }
+}
+
+/// Clone an element (needed because we need to redistribute namespace children)
+fn clone_element(element: &Element) -> Element {
+    match element {
+        Element::Compound(c) => Element::Compound(types::Compound {
+            name: c.name.clone(),
+            compound_type: c.compound_type.clone(),
+            members: c.members.clone(),
+            methods: c
+                .methods
+                .iter()
+                .map(|m| types::Function {
+                    name: m.name.clone(),
+                    return_type: m.return_type.clone(),
+                    parameters: m.parameters.clone(),
+                    variables: m.variables.clone(),
+                    lexical_blocks: m.lexical_blocks.clone(),
+                    inlined_calls: m.inlined_calls.clone(),
+                    labels: m.labels.clone(),
+                    line: m.line,
+                    is_method: m.is_method,
+                    class_name: m.class_name.clone(),
+                    accessibility: m.accessibility.clone(),
+                    has_body: m.has_body,
+                    low_pc: m.low_pc,
+                    high_pc: m.high_pc,
+                    is_inline: m.is_inline,
+                    is_external: m.is_external,
+                    is_virtual: m.is_virtual,
+                    is_constructor: m.is_constructor,
+                    is_destructor: m.is_destructor,
+                    linkage_name: m.linkage_name.clone(),
+                    is_artificial: m.is_artificial,
+                    decl_file: m.decl_file,
+                    specification_offset: m.specification_offset,
+                    decl_offset: m.decl_offset,
+                })
+                .collect(),
+            enum_values: c.enum_values.clone(),
+            line: c.line,
+            is_typedef: c.is_typedef,
+            typedef_name: c.typedef_name.clone(),
+            typedef_line: c.typedef_line,
+            byte_size: c.byte_size,
+            base_classes: c.base_classes.clone(),
+            is_virtual: c.is_virtual,
+            decl_file: c.decl_file,
+        }),
+        Element::Function(f) => Element::Function(types::Function {
+            name: f.name.clone(),
+            return_type: f.return_type.clone(),
+            parameters: f.parameters.clone(),
+            variables: f.variables.clone(),
+            lexical_blocks: f.lexical_blocks.clone(),
+            inlined_calls: f.inlined_calls.clone(),
+            labels: f.labels.clone(),
+            line: f.line,
+            is_method: f.is_method,
+            class_name: f.class_name.clone(),
+            accessibility: f.accessibility.clone(),
+            has_body: f.has_body,
+            low_pc: f.low_pc,
+            high_pc: f.high_pc,
+            is_inline: f.is_inline,
+            is_external: f.is_external,
+            is_virtual: f.is_virtual,
+            is_constructor: f.is_constructor,
+            is_destructor: f.is_destructor,
+            linkage_name: f.linkage_name.clone(),
+            is_artificial: f.is_artificial,
+            decl_file: f.decl_file,
+            specification_offset: f.specification_offset,
+            decl_offset: f.decl_offset,
+        }),
+        Element::Variable(v) => Element::Variable(v.clone()),
+        Element::Namespace(ns) => {
+            // Recursively clone namespace children
+            Element::Namespace(Namespace {
+                name: ns.name.clone(),
+                line: ns.line,
+                children: ns.children.iter().map(clone_element).collect(),
+            })
+        }
+        Element::TypedefAlias(t) => Element::TypedefAlias(types::TypedefAlias {
+            name: t.name.clone(),
+            target_type: t.target_type.clone(),
+            line: t.line,
+            decl_file: t.decl_file,
+        }),
+    }
+}
+
+/// Group elements by their declaration file, properly handling namespaces
+/// by splitting their children by decl_file and wrapping them in namespace elements
+fn group_elements_by_file(elements: &[Element]) -> HashMap<Option<u64>, Vec<Element>> {
+    let mut elements_by_file: HashMap<Option<u64>, Vec<Element>> = HashMap::new();
+
+    for element in elements {
+        match element {
+            Element::Namespace(ns) => {
+                // Split namespace children by their decl_file
+                let split = split_namespace_by_file(ns);
+
+                for (file, children) in split.children_by_file {
+                    if !children.is_empty() {
+                        // Create a new namespace containing just the children for this file
+                        let filtered_ns = Namespace {
+                            name: split.name.clone(),
+                            line: split.line,
+                            children,
+                        };
+                        elements_by_file
+                            .entry(file)
+                            .or_default()
+                            .push(Element::Namespace(filtered_ns));
+                    }
+                }
+            }
+            _ => {
+                let decl_file = get_element_decl_file(element);
+                elements_by_file
+                    .entry(decl_file)
+                    .or_default()
+                    .push(clone_element(element));
+            }
+        }
+    }
+
+    elements_by_file
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -153,20 +345,9 @@ fn main() -> Result<()> {
     };
 
     for cu in &compile_units {
-        // Group elements by declaration file
-        let mut elements_by_file: HashMap<Option<u64>, Vec<&types::Element>> = HashMap::new();
-
-        for element in &cu.elements {
-            let decl_file = match element {
-                types::Element::Compound(c) => c.decl_file,
-                types::Element::Function(f) => f.decl_file,
-                types::Element::Variable(v) => v.decl_file,
-                types::Element::Namespace(_) => None, // Namespaces don't have decl_file
-                types::Element::TypedefAlias(t) => t.decl_file,
-            };
-
-            elements_by_file.entry(decl_file).or_default().push(element);
-        }
+        // Group elements by declaration file, properly handling namespaces
+        // by splitting their children by decl_file
+        let elements_by_file = group_elements_by_file(&cu.elements);
 
         // Normalize the compile unit path
         let cu_path_normalized = normalize_path(&cu.name);
@@ -189,8 +370,9 @@ fn main() -> Result<()> {
                     // Generate header content
                     generator.generate_header_comment(&cu.name, file_path);
 
-                    // Generate elements for this header
-                    generator.generate_elements(elements);
+                    // Generate elements for this header (convert owned to refs)
+                    let element_refs: Vec<&types::Element> = elements.iter().collect();
+                    generator.generate_elements(&element_refs);
 
                     // Determine output path for header file
                     let output_path = output_dir.join(&header_path_normalized);
@@ -220,12 +402,12 @@ fn main() -> Result<()> {
 
         // Add elements without decl_file
         if let Some(elems) = elements_by_file.get(&None) {
-            main_elements.extend(elems.iter().copied());
+            main_elements.extend(elems.iter());
         }
 
         // Add elements with decl_file = 0 (some DWARF producers use 0 for the CU file)
         if let Some(elems) = elements_by_file.get(&Some(0)) {
-            main_elements.extend(elems.iter().copied());
+            main_elements.extend(elems.iter());
         }
 
         // Add elements declared in the compile unit's own file
@@ -233,7 +415,7 @@ fn main() -> Result<()> {
             // Avoid double-counting if cu_idx is 0
             if cu_idx != 0 {
                 if let Some(elems) = elements_by_file.get(&Some(cu_idx)) {
-                    main_elements.extend(elems.iter().copied());
+                    main_elements.extend(elems.iter());
                 }
             }
         }
