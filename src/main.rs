@@ -110,6 +110,10 @@ struct Args {
     /// Disable "//No line number" comments for elements without line numbers
     #[arg(long)]
     disable_no_line_comment: bool,
+
+    /// Include "class ", "struct ", "union ", "enum " prefixes in type references
+    #[arg(long)]
+    verbose_class_usage: bool,
 }
 
 /// Get the decl_file for an element (recursively checks namespace children)
@@ -251,6 +255,7 @@ fn main() -> Result<()> {
         no_function_prototypes: args.no_function_prototypes || args.minimal,
         pointer_size,
         disable_no_line_comment: args.disable_no_line_comment,
+        verbose_class_usage: args.verbose_class_usage,
     };
 
     for cu in &compile_units {
