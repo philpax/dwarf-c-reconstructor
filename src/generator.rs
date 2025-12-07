@@ -1008,10 +1008,14 @@ impl CodeGenerator {
         }
 
         // Return type (skip for constructors/destructors, apply type shortening)
+        // For return types, pointer/reference stays with the type (e.g., int* func())
         if !is_constructor && !func.is_destructor {
             decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
-            if func.return_type.pointer_count > 0 {
-                decl.push(' ');
+            if func.return_type.is_rvalue_reference {
+                decl.push_str("&&");
+            } else if func.return_type.is_reference {
+                decl.push('&');
+            } else if func.return_type.pointer_count > 0 {
                 decl.push_str(&"*".repeat(func.return_type.pointer_count));
             }
             decl.push(' ');
@@ -1198,10 +1202,14 @@ impl CodeGenerator {
         let is_constructor = func.class_name.as_ref() == Some(&func.name);
 
         // Return type (skip for constructors/destructors, apply type shortening)
+        // For return types, pointer/reference stays with the type (e.g., int* func())
         if !is_constructor && !func.is_destructor {
             decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
-            if func.return_type.pointer_count > 0 {
-                decl.push(' ');
+            if func.return_type.is_rvalue_reference {
+                decl.push_str("&&");
+            } else if func.return_type.is_reference {
+                decl.push('&');
+            } else if func.return_type.pointer_count > 0 {
                 decl.push_str(&"*".repeat(func.return_type.pointer_count));
             }
             decl.push(' ');

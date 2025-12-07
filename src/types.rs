@@ -103,8 +103,9 @@ impl TypeInfo {
                 result.push_str("restrict ");
             }
             result.push_str(&self.base_type);
+            result.push(' ');
 
-            // References and pointers (attached to type, no space before)
+            // References and pointers (attached to variable name)
             if self.is_rvalue_reference {
                 result.push_str("&&");
             } else if self.is_reference {
@@ -113,7 +114,6 @@ impl TypeInfo {
                 result.push_str(&"*".repeat(self.pointer_count));
             }
 
-            result.push(' ');
             result.push_str(var_name);
 
             for size in &self.array_sizes {
