@@ -162,7 +162,7 @@ fn split_namespace_by_file(ns: &Namespace) -> NamespaceByFile {
             children_by_file
                 .entry(decl_file)
                 .or_default()
-                .push(clone_element(child));
+                .push(child.clone());
         }
     }
 
@@ -170,97 +170,6 @@ fn split_namespace_by_file(ns: &Namespace) -> NamespaceByFile {
         name: ns.name.clone(),
         line: ns.line,
         children_by_file,
-    }
-}
-
-/// Clone an element (needed because we need to redistribute namespace children)
-fn clone_element(element: &Element) -> Element {
-    match element {
-        Element::Compound(c) => Element::Compound(types::Compound {
-            name: c.name.clone(),
-            compound_type: c.compound_type.clone(),
-            members: c.members.clone(),
-            methods: c
-                .methods
-                .iter()
-                .map(|m| types::Function {
-                    name: m.name.clone(),
-                    return_type: m.return_type.clone(),
-                    parameters: m.parameters.clone(),
-                    variables: m.variables.clone(),
-                    lexical_blocks: m.lexical_blocks.clone(),
-                    inlined_calls: m.inlined_calls.clone(),
-                    labels: m.labels.clone(),
-                    line: m.line,
-                    is_method: m.is_method,
-                    class_name: m.class_name.clone(),
-                    accessibility: m.accessibility.clone(),
-                    has_body: m.has_body,
-                    low_pc: m.low_pc,
-                    high_pc: m.high_pc,
-                    is_inline: m.is_inline,
-                    is_external: m.is_external,
-                    is_virtual: m.is_virtual,
-                    is_constructor: m.is_constructor,
-                    is_destructor: m.is_destructor,
-                    linkage_name: m.linkage_name.clone(),
-                    is_artificial: m.is_artificial,
-                    decl_file: m.decl_file,
-                    specification_offset: m.specification_offset,
-                    decl_offset: m.decl_offset,
-                })
-                .collect(),
-            enum_values: c.enum_values.clone(),
-            line: c.line,
-            is_typedef: c.is_typedef,
-            typedef_name: c.typedef_name.clone(),
-            typedef_line: c.typedef_line,
-            byte_size: c.byte_size,
-            base_classes: c.base_classes.clone(),
-            is_virtual: c.is_virtual,
-            decl_file: c.decl_file,
-        }),
-        Element::Function(f) => Element::Function(types::Function {
-            name: f.name.clone(),
-            return_type: f.return_type.clone(),
-            parameters: f.parameters.clone(),
-            variables: f.variables.clone(),
-            lexical_blocks: f.lexical_blocks.clone(),
-            inlined_calls: f.inlined_calls.clone(),
-            labels: f.labels.clone(),
-            line: f.line,
-            is_method: f.is_method,
-            class_name: f.class_name.clone(),
-            accessibility: f.accessibility.clone(),
-            has_body: f.has_body,
-            low_pc: f.low_pc,
-            high_pc: f.high_pc,
-            is_inline: f.is_inline,
-            is_external: f.is_external,
-            is_virtual: f.is_virtual,
-            is_constructor: f.is_constructor,
-            is_destructor: f.is_destructor,
-            linkage_name: f.linkage_name.clone(),
-            is_artificial: f.is_artificial,
-            decl_file: f.decl_file,
-            specification_offset: f.specification_offset,
-            decl_offset: f.decl_offset,
-        }),
-        Element::Variable(v) => Element::Variable(v.clone()),
-        Element::Namespace(ns) => {
-            // Recursively clone namespace children
-            Element::Namespace(Namespace {
-                name: ns.name.clone(),
-                line: ns.line,
-                children: ns.children.iter().map(clone_element).collect(),
-            })
-        }
-        Element::TypedefAlias(t) => Element::TypedefAlias(types::TypedefAlias {
-            name: t.name.clone(),
-            target_type: t.target_type.clone(),
-            line: t.line,
-            decl_file: t.decl_file,
-        }),
     }
 }
 
@@ -295,7 +204,7 @@ fn group_elements_by_file(elements: &[Element]) -> HashMap<Option<u64>, Vec<Elem
                 elements_by_file
                     .entry(decl_file)
                     .or_default()
-                    .push(clone_element(element));
+                    .push(element.clone());
             }
         }
     }
