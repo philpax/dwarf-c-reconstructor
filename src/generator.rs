@@ -597,6 +597,26 @@ impl CodeGenerator {
     }
 
     fn generate_class(&mut self, compound: &Compound) {
+        // Check if this is a forward declaration (no members, no methods, no base classes)
+        let is_forward_decl = compound.members.is_empty()
+            && compound.methods.is_empty()
+            && compound.base_classes.is_empty();
+
+        if is_forward_decl {
+            // Forward declaration - just output "class ClassName;"
+            let mut line = format!(
+                "class {};",
+                compound.name.as_ref().unwrap_or(&String::from("unnamed"))
+            );
+
+            if let Some(line_num) = compound.line {
+                line.push_str(&format!(" //{}", line_num));
+            }
+
+            self.write_line(&line);
+            return;
+        }
+
         let mut opening = format!(
             "class {}",
             compound.name.as_ref().unwrap_or(&String::from("unnamed"))
