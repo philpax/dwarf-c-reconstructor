@@ -75,7 +75,7 @@ fn apply_relocations<'a>(
 pub struct DwarfParser<'a> {
     dwarf: Dwarf<DwarfReader<'a>>,
     type_cache: HashMap<usize, TypeInfo>,
-    typedef_map: HashMap<usize, (String, Option<u64>, Option<u64>)>, // (name, line, decl_file)
+    typedef_map: HashMap<usize, TypedefInfo>,
     abstract_origins: HashMap<usize, String>,
     // Keep the relocated section data alive in stable heap allocations
     _section_data: Vec<Box<[u8]>>,
@@ -201,18 +201,6 @@ impl<'a> DwarfParser<'a> {
     fn cross_cu_match_method_definitions(compile_units: &mut [CompileUnit]) {
         use std::collections::HashMap;
 
-        type MethodDefinition = (
-            Vec<Parameter>,
-            Vec<Variable>,
-            Vec<LexicalBlock>,
-            Vec<InlinedSubroutine>,
-            Vec<Label>,
-            bool,
-            Option<u64>,
-            Option<u64>,
-            Option<u64>,
-        );
-
         fn collect_definitions(
             elements: &[Element],
             definitions: &mut HashMap<String, MethodDefinition>,
@@ -224,19 +212,9 @@ impl<'a> DwarfParser<'a> {
                         // they reference a class declaration)
                         if func.is_method && func.specification_offset.is_some() {
                             if let Some(ref linkage_name) = func.linkage_name {
-                                definitions.entry(linkage_name.clone()).or_insert_with(|| {
-                                    (
-                                        func.parameters.clone(),
-                                        func.variables.clone(),
-                                        func.lexical_blocks.clone(),
-                                        func.inlined_calls.clone(),
-                                        func.labels.clone(),
-                                        func.has_body,
-                                        func.low_pc,
-                                        func.high_pc,
-                                        func.line,
-                                    )
-                                });
+                                definitions
+                                    .entry(linkage_name.clone())
+                                    .or_insert_with(|| MethodDefinition::from_function(func));
                             }
                         }
                     }
@@ -260,29 +238,8 @@ impl<'a> DwarfParser<'a> {
                             // (meaning intra-CU matching didn't find a definition)
                             if method.parameters.is_empty() {
                                 if let Some(ref linkage_name) = method.linkage_name {
-                                    if let Some((
-                                        params,
-                                        vars,
-                                        blocks,
-                                        inlined,
-                                        labels,
-                                        has_body,
-                                        low_pc,
-                                        high_pc,
-                                        line,
-                                    )) = definitions.get(linkage_name)
-                                    {
-                                        method.parameters = params.clone();
-                                        method.variables = vars.clone();
-                                        method.lexical_blocks = blocks.clone();
-                                        method.inlined_calls = inlined.clone();
-                                        method.labels = labels.clone();
-                                        method.has_body = *has_body;
-                                        method.low_pc = *low_pc;
-                                        method.high_pc = *high_pc;
-                                        if method.line.is_none() {
-                                            method.line = *line;
-                                        }
+                                    if let Some(def) = definitions.get(linkage_name) {
+                                        def.apply_to_method(method);
                                     }
                                 }
                             }
@@ -313,18 +270,6 @@ impl<'a> DwarfParser<'a> {
     fn match_method_definitions(elements: &mut [Element]) {
         use std::collections::HashMap;
 
-        type MethodDefinition = (
-            Vec<Parameter>,
-            Vec<Variable>,
-            Vec<LexicalBlock>,
-            Vec<InlinedSubroutine>,
-            Vec<Label>,
-            bool,
-            Option<u64>,
-            Option<u64>,
-            Option<u64>, // line from definition
-        );
-
         // Build maps of definitions:
         // 1. By linkage name (for methods that have it on both declaration and definition)
         // 2. By specification offset (for methods that use DW_AT_specification)
@@ -333,17 +278,7 @@ impl<'a> DwarfParser<'a> {
 
         for element in elements.iter() {
             if let Element::Function(func) = element {
-                let definition_data = (
-                    func.parameters.clone(),
-                    func.variables.clone(),
-                    func.lexical_blocks.clone(),
-                    func.inlined_calls.clone(),
-                    func.labels.clone(),
-                    func.has_body,
-                    func.low_pc,
-                    func.high_pc,
-                    func.line,
-                );
+                let definition_data = MethodDefinition::from_function(func);
 
                 // If this function has a specification_offset, it's a definition referencing a declaration
                 if let Some(spec_offset) = func.specification_offset {
@@ -366,31 +301,8 @@ impl<'a> DwarfParser<'a> {
                     for method in &mut compound.methods {
                         // First try to match by decl_offset (specification_offset on definition points to this)
                         let matched = if let Some(decl_offset) = method.decl_offset {
-                            if let Some((
-                                params,
-                                vars,
-                                blocks,
-                                inlined,
-                                labels,
-                                has_body,
-                                low_pc,
-                                high_pc,
-                                line,
-                            )) = definitions_by_spec_offset.get(&decl_offset)
-                            {
-                                // Found matching definition by specification offset
-                                method.parameters = params.clone();
-                                method.variables = vars.clone();
-                                method.lexical_blocks = blocks.clone();
-                                method.inlined_calls = inlined.clone();
-                                method.labels = labels.clone();
-                                method.has_body = *has_body;
-                                method.low_pc = *low_pc;
-                                method.high_pc = *high_pc;
-                                // Use line from definition if declaration doesn't have one
-                                if method.line.is_none() {
-                                    method.line = *line;
-                                }
+                            if let Some(def) = definitions_by_spec_offset.get(&decl_offset) {
+                                def.apply_to_method(method);
                                 true
                             } else {
                                 false
@@ -402,30 +314,8 @@ impl<'a> DwarfParser<'a> {
                         // Fall back to linkage name matching if specification matching didn't work
                         if !matched {
                             if let Some(ref linkage_name) = method.linkage_name {
-                                if let Some((
-                                    params,
-                                    vars,
-                                    blocks,
-                                    inlined,
-                                    labels,
-                                    has_body,
-                                    low_pc,
-                                    high_pc,
-                                    line,
-                                )) = definitions_by_linkage.get(linkage_name)
-                                {
-                                    // Found matching definition by linkage name
-                                    method.parameters = params.clone();
-                                    method.variables = vars.clone();
-                                    method.lexical_blocks = blocks.clone();
-                                    method.inlined_calls = inlined.clone();
-                                    method.labels = labels.clone();
-                                    method.has_body = *has_body;
-                                    method.low_pc = *low_pc;
-                                    method.high_pc = *high_pc;
-                                    if method.line.is_none() {
-                                        method.line = *line;
-                                    }
+                                if let Some(def) = definitions_by_linkage.get(linkage_name) {
+                                    def.apply_to_method(method);
                                 }
                             }
                         }
@@ -519,8 +409,14 @@ impl<'a> DwarfParser<'a> {
                     if let Some(type_offset) = self.get_ref_attr(unit, entry, gimli::DW_AT_type) {
                         // Convert to absolute offset
                         let abs_type_offset = unit_base + type_offset;
-                        self.typedef_map
-                            .insert(abs_type_offset, (name, line, decl_file));
+                        self.typedef_map.insert(
+                            abs_type_offset,
+                            TypedefInfo {
+                                name,
+                                line,
+                                decl_file,
+                            },
+                        );
                     }
                 }
             }
@@ -861,35 +757,16 @@ impl<'a> DwarfParser<'a> {
         let abs_offset = unit_base + offset_val;
 
         // Only merge typedef if it's in the same file as the struct
-        let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&abs_offset) {
-                // Only merge if BOTH have known file and they match
-                // This prevents forward declaration typedefs from appearing in every file
-                let same_file = match (decl_file, typedef_file) {
-                    (Some(a), Some(b)) => a == *b,
-                    _ => false, // If either is unknown, don't merge to avoid duplication
-                };
-                if same_file {
-                    (true, Some(tname.clone()), *tline)
-                } else {
-                    (false, None, None)
-                }
-            } else {
-                (false, None, None)
-            };
-
-        self.parse_compound_children(
-            unit,
+        let metadata = self.build_compound_metadata_with_typedef(
             name,
             line,
             byte_size,
-            is_typedef,
-            typedef_name,
-            typedef_line,
             compound_type,
             decl_file,
-            &mut entries,
-        )
+            abs_offset,
+        );
+
+        self.parse_compound_children(unit, metadata, &mut entries)
     }
 
     fn parse_enum_offset(
@@ -916,34 +793,11 @@ impl<'a> DwarfParser<'a> {
         let abs_offset = unit_base + offset_val;
 
         // Only merge typedef if it's in the same file as the enum
-        let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&abs_offset) {
-                // Only merge if BOTH have known file and they match
-                // This prevents forward declaration typedefs from appearing in every file
-                let same_file = match (decl_file, typedef_file) {
-                    (Some(a), Some(b)) => a == *b,
-                    _ => false, // If either is unknown, don't merge to avoid duplication
-                };
-                if same_file {
-                    (true, Some(tname.clone()), *tline)
-                } else {
-                    (false, None, None)
-                }
-            } else {
-                (false, None, None)
-            };
+        let metadata = self.build_compound_metadata_with_typedef(
+            name, line, byte_size, "enum", decl_file, abs_offset,
+        );
 
-        self.parse_enum_children(
-            unit,
-            name,
-            line,
-            byte_size,
-            is_typedef,
-            typedef_name,
-            typedef_line,
-            decl_file,
-            &mut entries,
-        )
+        self.parse_enum_children(unit, metadata, &mut entries)
     }
 
     fn parse_function_offset(
@@ -1076,15 +930,14 @@ impl<'a> DwarfParser<'a> {
             None
         };
 
-        self.parse_function_children(
-            unit,
+        let metadata = FunctionMetadata {
             name,
             decl_file,
             line,
             return_type,
             accessibility,
             has_body,
-            effective_is_method,
+            is_method: effective_is_method,
             low_pc,
             high_pc,
             is_inline,
@@ -1094,10 +947,11 @@ impl<'a> DwarfParser<'a> {
             is_destructor,
             linkage_name,
             is_artificial,
-            spec_abs_offset, // specification_offset
+            specification_offset: spec_abs_offset,
             decl_offset,
-            &mut entries,
-        )
+        };
+
+        self.parse_function_children(unit, metadata, &mut entries)
     }
 
     fn parse_lexical_block_offset(
@@ -1127,16 +981,39 @@ impl<'a> DwarfParser<'a> {
 
         // Check if typedef - only merge if in same file
         let offset = entry.offset().0;
+        let metadata = self.build_compound_metadata_with_typedef(
+            name,
+            line,
+            byte_size,
+            compound_type,
+            decl_file,
+            offset,
+        );
+
+        self.parse_compound_children(unit, metadata, entries)
+    }
+
+    /// Build CompoundMetadata with typedef information if applicable.
+    /// Only merges typedef if it's in the same file as the compound type.
+    fn build_compound_metadata_with_typedef(
+        &self,
+        name: Option<String>,
+        line: Option<u64>,
+        byte_size: Option<u64>,
+        compound_type: &str,
+        decl_file: Option<u64>,
+        abs_offset: usize,
+    ) -> CompoundMetadata {
         let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&offset) {
+            if let Some(typedef_info) = self.typedef_map.get(&abs_offset) {
                 // Only merge if BOTH have known file and they match
                 // This prevents forward declaration typedefs from appearing in every file
-                let same_file = match (decl_file, typedef_file) {
-                    (Some(a), Some(b)) => a == *b,
+                let same_file = match (decl_file, typedef_info.decl_file) {
+                    (Some(a), Some(b)) => a == b,
                     _ => false, // If either is unknown, don't merge to avoid duplication
                 };
                 if same_file {
-                    (true, Some(tname.clone()), *tline)
+                    (true, Some(typedef_info.name.clone()), typedef_info.line)
                 } else {
                     (false, None, None)
                 }
@@ -1144,31 +1021,22 @@ impl<'a> DwarfParser<'a> {
                 (false, None, None)
             };
 
-        self.parse_compound_children(
-            unit,
+        CompoundMetadata {
             name,
             line,
             byte_size,
             is_typedef,
             typedef_name,
             typedef_line,
-            compound_type,
+            compound_type: compound_type.to_string(),
             decl_file,
-            entries,
-        )
+        }
     }
 
     fn parse_compound_children(
         &mut self,
         unit: &DwarfUnit,
-        name: Option<String>,
-        line: Option<u64>,
-        byte_size: Option<u64>,
-        is_typedef: bool,
-        typedef_name: Option<String>,
-        typedef_line: Option<u64>,
-        compound_type: &str,
-        decl_file: Option<u64>,
+        metadata: CompoundMetadata,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Compound>> {
         let mut members = Vec::new();
@@ -1208,7 +1076,7 @@ impl<'a> DwarfParser<'a> {
                         // This is a method declaration
                         if let Some(mut func) = self.parse_function_at(unit, offset, true)? {
                             // Set the class name for constructor detection
-                            func.class_name = name.clone();
+                            func.class_name = metadata.name.clone();
                             methods.push(func);
                         }
                     }
@@ -1223,19 +1091,19 @@ impl<'a> DwarfParser<'a> {
         }
 
         Ok(Some(Compound {
-            name,
-            compound_type: compound_type.to_string(),
+            name: metadata.name,
+            compound_type: metadata.compound_type,
             members,
             methods,
             enum_values: Vec::new(),
-            line,
-            is_typedef,
-            typedef_name,
-            typedef_line,
-            byte_size,
+            line: metadata.line,
+            is_typedef: metadata.is_typedef,
+            typedef_name: metadata.typedef_name,
+            typedef_line: metadata.typedef_line,
+            byte_size: metadata.byte_size,
             base_classes,
             is_virtual,
-            decl_file,
+            decl_file: metadata.decl_file,
         }))
     }
 
@@ -1252,46 +1120,16 @@ impl<'a> DwarfParser<'a> {
 
         // Check if typedef - only merge if in same file
         let offset = entry.offset().0;
-        let (is_typedef, typedef_name, typedef_line) =
-            if let Some((tname, tline, typedef_file)) = self.typedef_map.get(&offset) {
-                // Only merge if BOTH have known file and they match
-                // This prevents forward declaration typedefs from appearing in every file
-                let same_file = match (decl_file, typedef_file) {
-                    (Some(a), Some(b)) => a == *b,
-                    _ => false, // If either is unknown, don't merge to avoid duplication
-                };
-                if same_file {
-                    (true, Some(tname.clone()), *tline)
-                } else {
-                    (false, None, None)
-                }
-            } else {
-                (false, None, None)
-            };
+        let metadata = self
+            .build_compound_metadata_with_typedef(name, line, byte_size, "enum", decl_file, offset);
 
-        self.parse_enum_children(
-            unit,
-            name,
-            line,
-            byte_size,
-            is_typedef,
-            typedef_name,
-            typedef_line,
-            decl_file,
-            entries,
-        )
+        self.parse_enum_children(unit, metadata, entries)
     }
 
     fn parse_enum_children(
         &mut self,
         unit: &DwarfUnit,
-        name: Option<String>,
-        line: Option<u64>,
-        byte_size: Option<u64>,
-        is_typedef: bool,
-        typedef_name: Option<String>,
-        typedef_line: Option<u64>,
-        decl_file: Option<u64>,
+        metadata: CompoundMetadata,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Compound>> {
         let mut enum_values = Vec::new();
@@ -1320,18 +1158,18 @@ impl<'a> DwarfParser<'a> {
         }
 
         Ok(Some(Compound {
-            name,
-            compound_type: "enum".to_string(),
+            name: metadata.name,
+            compound_type: metadata.compound_type,
             members: Vec::new(),
             methods: Vec::new(),
             enum_values,
-            line,
-            is_typedef,
-            typedef_name,
-            typedef_line,
-            byte_size,
+            line: metadata.line,
+            is_typedef: metadata.is_typedef,
+            typedef_name: metadata.typedef_name,
+            typedef_line: metadata.typedef_line,
+            byte_size: metadata.byte_size,
             base_classes: Vec::new(),
-            decl_file,
+            decl_file: metadata.decl_file,
             is_virtual: false,
         }))
     }
@@ -1494,8 +1332,7 @@ impl<'a> DwarfParser<'a> {
             None
         };
 
-        self.parse_function_children(
-            unit,
+        let metadata = FunctionMetadata {
             name,
             decl_file,
             line,
@@ -1512,33 +1349,17 @@ impl<'a> DwarfParser<'a> {
             is_destructor,
             linkage_name,
             is_artificial,
-            None, // specification_offset (this function is for declarations, not definitions)
+            specification_offset: None, // this function is for declarations, not definitions
             decl_offset,
-            entries,
-        )
+        };
+
+        self.parse_function_children(unit, metadata, entries)
     }
 
     fn parse_function_children(
         &mut self,
         unit: &DwarfUnit,
-        name: String,
-        decl_file: Option<u64>,
-        line: Option<u64>,
-        return_type: TypeInfo,
-        accessibility: Option<String>,
-        has_body: bool,
-        is_method: bool,
-        low_pc: Option<u64>,
-        high_pc: Option<u64>,
-        is_inline: bool,
-        is_external: bool,
-        is_virtual: bool,
-        is_constructor: bool,
-        is_destructor: bool,
-        linkage_name: Option<String>,
-        is_artificial: bool,
-        specification_offset: Option<usize>,
-        decl_offset: Option<usize>,
+        metadata: FunctionMetadata,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
     ) -> Result<Option<Function>> {
         let mut parameters = Vec::new();
@@ -1597,30 +1418,30 @@ impl<'a> DwarfParser<'a> {
         }
 
         Ok(Some(Function {
-            name,
-            return_type,
+            name: metadata.name,
+            return_type: metadata.return_type,
             parameters,
             variables,
             lexical_blocks,
             inlined_calls,
             labels,
-            line,
-            is_method,
+            line: metadata.line,
+            is_method: metadata.is_method,
             class_name: None,
-            accessibility,
-            has_body,
-            low_pc,
-            high_pc,
-            is_inline,
-            is_external,
-            is_virtual,
-            is_constructor,
-            is_destructor,
-            linkage_name,
-            is_artificial,
-            decl_file,
-            specification_offset,
-            decl_offset,
+            accessibility: metadata.accessibility,
+            has_body: metadata.has_body,
+            low_pc: metadata.low_pc,
+            high_pc: metadata.high_pc,
+            is_inline: metadata.is_inline,
+            is_external: metadata.is_external,
+            is_virtual: metadata.is_virtual,
+            is_constructor: metadata.is_constructor,
+            is_destructor: metadata.is_destructor,
+            linkage_name: metadata.linkage_name,
+            is_artificial: metadata.is_artificial,
+            decl_file: metadata.decl_file,
+            specification_offset: metadata.specification_offset,
+            decl_offset: metadata.decl_offset,
         }))
     }
 
@@ -2077,8 +1898,8 @@ impl<'a> DwarfParser<'a> {
                     // Check if it has a typedef (only if substitution is enabled)
                     if use_typedef_substitution {
                         let offset = entry.offset().0;
-                        if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
-                            return Ok(TypeInfo::new(typedef_name.clone()));
+                        if let Some(typedef_info) = self.typedef_map.get(&offset) {
+                            return Ok(TypeInfo::new(typedef_info.name.clone()));
                         }
                     }
                     Ok(TypeInfo::new(format!("{}{}", prefix, n)))
@@ -2086,8 +1907,8 @@ impl<'a> DwarfParser<'a> {
                     // Anonymous type, check for typedef (only if substitution is enabled)
                     if use_typedef_substitution {
                         let offset = entry.offset().0;
-                        if let Some((typedef_name, _, _)) = self.typedef_map.get(&offset) {
-                            return Ok(TypeInfo::new(typedef_name.clone()));
+                        if let Some(typedef_info) = self.typedef_map.get(&offset) {
+                            return Ok(TypeInfo::new(typedef_info.name.clone()));
                         }
                     }
                     Ok(TypeInfo::new("void".to_string()))

@@ -3,6 +3,101 @@
 pub type DwarfReader<'a> = gimli::EndianSlice<'a, gimli::LittleEndian>;
 pub type DwarfUnit<'a> = gimli::Unit<DwarfReader<'a>>;
 
+/// Information about a typedef collected during metadata pass.
+/// Maps a type offset to its typedef name and source location.
+#[derive(Debug, Clone)]
+pub struct TypedefInfo {
+    pub name: String,
+    pub line: Option<u64>,
+    pub decl_file: Option<u64>,
+}
+
+/// Metadata for parsing compound types (struct/class/union).
+/// Groups related fields passed to parse_compound_children.
+#[derive(Debug, Clone)]
+pub struct CompoundMetadata {
+    pub name: Option<String>,
+    pub line: Option<u64>,
+    pub byte_size: Option<u64>,
+    pub is_typedef: bool,
+    pub typedef_name: Option<String>,
+    pub typedef_line: Option<u64>,
+    pub compound_type: String,
+    pub decl_file: Option<u64>,
+}
+
+/// Metadata for parsing function/method definitions.
+/// Groups the many fields needed for parse_function_children.
+#[derive(Debug, Clone)]
+pub struct FunctionMetadata {
+    pub name: String,
+    pub decl_file: Option<u64>,
+    pub line: Option<u64>,
+    pub return_type: TypeInfo,
+    pub accessibility: Option<String>,
+    pub has_body: bool,
+    pub is_method: bool,
+    pub low_pc: Option<u64>,
+    pub high_pc: Option<u64>,
+    pub is_inline: bool,
+    pub is_external: bool,
+    pub is_virtual: bool,
+    pub is_constructor: bool,
+    pub is_destructor: bool,
+    pub linkage_name: Option<String>,
+    pub is_artificial: bool,
+    pub specification_offset: Option<usize>,
+    pub decl_offset: Option<usize>,
+}
+
+/// Data collected from a method definition that can be applied to declarations.
+/// Used for matching method declarations with their definitions.
+#[derive(Debug, Clone)]
+pub struct MethodDefinition {
+    pub parameters: Vec<Parameter>,
+    pub variables: Vec<Variable>,
+    pub lexical_blocks: Vec<LexicalBlock>,
+    pub inlined_calls: Vec<InlinedSubroutine>,
+    pub labels: Vec<Label>,
+    pub has_body: bool,
+    pub low_pc: Option<u64>,
+    pub high_pc: Option<u64>,
+    pub line: Option<u64>,
+}
+
+impl MethodDefinition {
+    /// Create a MethodDefinition from a Function.
+    pub fn from_function(func: &Function) -> Self {
+        MethodDefinition {
+            parameters: func.parameters.clone(),
+            variables: func.variables.clone(),
+            lexical_blocks: func.lexical_blocks.clone(),
+            inlined_calls: func.inlined_calls.clone(),
+            labels: func.labels.clone(),
+            has_body: func.has_body,
+            low_pc: func.low_pc,
+            high_pc: func.high_pc,
+            line: func.line,
+        }
+    }
+
+    /// Apply this definition's data to a method declaration.
+    pub fn apply_to_method(&self, method: &mut Function) {
+        method.parameters = self.parameters.clone();
+        method.variables = self.variables.clone();
+        method.lexical_blocks = self.lexical_blocks.clone();
+        method.inlined_calls = self.inlined_calls.clone();
+        method.labels = self.labels.clone();
+        method.has_body = self.has_body;
+        method.low_pc = self.low_pc;
+        method.high_pc = self.high_pc;
+        // Use line from definition if declaration doesn't have one
+        if method.line.is_none() {
+            method.line = self.line;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
     pub base_type: String,
