@@ -181,13 +181,132 @@ impl<'a> DwarfParser<'a> {
         while let Some(header) = units.next()? {
             let unit = self.dwarf.unit(header)?;
             if let Some(mut cu) = self.parse_compile_unit(&unit)? {
-                // Third pass: match method declarations with definitions
+                // First do intra-CU matching (uses decl_offset/spec_offset)
                 Self::match_method_definitions(&mut cu.elements);
                 compile_units.push(cu);
             }
         }
 
+        // Third pass: cross-CU matching for methods that couldn't be matched within their CU
+        // This handles the case where class declarations are in headers included by multiple CUs,
+        // but method definitions are only in one CU
+        Self::cross_cu_match_method_definitions(&mut compile_units);
+
         Ok(compile_units)
+    }
+
+    /// Match method declarations across all CUs using linkage names
+    /// This handles cases where a header is included in multiple CUs but the method
+    /// definitions are only in one CU (the .cpp file)
+    fn cross_cu_match_method_definitions(compile_units: &mut [CompileUnit]) {
+        use std::collections::HashMap;
+
+        type MethodDefinition = (
+            Vec<Parameter>,
+            Vec<Variable>,
+            Vec<LexicalBlock>,
+            Vec<InlinedSubroutine>,
+            Vec<Label>,
+            bool,
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+        );
+
+        fn collect_definitions(
+            elements: &[Element],
+            definitions: &mut HashMap<String, MethodDefinition>,
+        ) {
+            for element in elements {
+                match element {
+                    Element::Function(func) => {
+                        // Only index method definitions (those with specification_offset, meaning
+                        // they reference a class declaration)
+                        if func.is_method && func.specification_offset.is_some() {
+                            if let Some(ref linkage_name) = func.linkage_name {
+                                definitions.entry(linkage_name.clone()).or_insert_with(|| {
+                                    (
+                                        func.parameters.clone(),
+                                        func.variables.clone(),
+                                        func.lexical_blocks.clone(),
+                                        func.inlined_calls.clone(),
+                                        func.labels.clone(),
+                                        func.has_body,
+                                        func.low_pc,
+                                        func.high_pc,
+                                        func.line,
+                                    )
+                                });
+                            }
+                        }
+                    }
+                    Element::Namespace(ns) => {
+                        collect_definitions(&ns.children, definitions);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn apply_matches(
+            elements: &mut [Element],
+            definitions: &HashMap<String, MethodDefinition>,
+        ) {
+            for element in elements.iter_mut() {
+                match element {
+                    Element::Compound(compound) => {
+                        for method in &mut compound.methods {
+                            // Only try cross-CU matching if method has no parameters yet
+                            // (meaning intra-CU matching didn't find a definition)
+                            if method.parameters.is_empty() {
+                                if let Some(ref linkage_name) = method.linkage_name {
+                                    if let Some((
+                                        params,
+                                        vars,
+                                        blocks,
+                                        inlined,
+                                        labels,
+                                        has_body,
+                                        low_pc,
+                                        high_pc,
+                                        line,
+                                    )) = definitions.get(linkage_name)
+                                    {
+                                        method.parameters = params.clone();
+                                        method.variables = vars.clone();
+                                        method.lexical_blocks = blocks.clone();
+                                        method.inlined_calls = inlined.clone();
+                                        method.labels = labels.clone();
+                                        method.has_body = *has_body;
+                                        method.low_pc = *low_pc;
+                                        method.high_pc = *high_pc;
+                                        if method.line.is_none() {
+                                            method.line = *line;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Element::Namespace(ns) => {
+                        apply_matches(&mut ns.children, definitions);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // First, collect all method definitions by linkage name from all CUs
+        let mut definitions_by_linkage: HashMap<String, MethodDefinition> = HashMap::new();
+
+        for cu in compile_units.iter() {
+            collect_definitions(&cu.elements, &mut definitions_by_linkage);
+        }
+
+        // Then, match unmatched method declarations using the global map
+        for cu in compile_units.iter_mut() {
+            apply_matches(&mut cu.elements, &definitions_by_linkage);
+        }
     }
 
     /// Match method declarations in classes with their definitions at top level
@@ -950,6 +1069,13 @@ impl<'a> DwarfParser<'a> {
         // If we have a specification, this is a method definition
         let effective_is_method = is_method || spec_abs_offset.is_some();
 
+        // For method declarations (inside classes), store their absolute offset so definitions can reference them
+        let decl_offset = if is_method && is_declaration && specification_offset.is_none() {
+            Some(unit_base + offset.0)
+        } else {
+            None
+        };
+
         self.parse_function_children(
             unit,
             name,
@@ -969,7 +1095,7 @@ impl<'a> DwarfParser<'a> {
             linkage_name,
             is_artificial,
             spec_abs_offset, // specification_offset
-            None,            // decl_offset (only for declarations)
+            decl_offset,
             &mut entries,
         )
     }
