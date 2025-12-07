@@ -288,12 +288,33 @@ impl CodeGenerator {
                     if let (Some(typedef_name), Some(size)) = (&c.typedef_name, c.byte_size) {
                         type_sizes.insert(typedef_name.clone(), size);
                     }
+                    // Also collect sizes from nested types
+                    Self::collect_type_sizes_from_compounds(type_sizes, &c.nested_types);
                 }
                 Element::Namespace(ns) => {
                     Self::collect_type_sizes_from_elements(type_sizes, &ns.children);
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn collect_type_sizes_from_compounds(
+        type_sizes: &mut HashMap<String, u64>,
+        compounds: &[Compound],
+    ) {
+        for c in compounds {
+            if let (Some(name), Some(size)) = (&c.name, c.byte_size) {
+                // Store both with and without compound type prefix for lookup
+                type_sizes.insert(name.clone(), size);
+                type_sizes.insert(format!("{} {}", c.compound_type, name), size);
+            }
+            // Also handle typedefs
+            if let (Some(typedef_name), Some(size)) = (&c.typedef_name, c.byte_size) {
+                type_sizes.insert(typedef_name.clone(), size);
+            }
+            // Recursively collect sizes from nested types
+            Self::collect_type_sizes_from_compounds(type_sizes, &c.nested_types);
         }
     }
 
@@ -474,7 +495,7 @@ impl CodeGenerator {
     }
 
     fn generate_struct_or_union(&mut self, compound: &Compound, use_typedef: bool) {
-        if compound.members.is_empty() {
+        if compound.members.is_empty() && compound.nested_types.is_empty() {
             // Empty struct/union - just output typedef or declaration
             let mut line = String::new();
 
@@ -511,7 +532,7 @@ impl CodeGenerator {
 
             self.write_line(&line);
         } else {
-            // Struct/union with members
+            // Struct/union with members or nested types
             let mut opening = String::new();
 
             if use_typedef {
@@ -568,8 +589,15 @@ impl CodeGenerator {
 
             self.write_line(&opening);
 
-            // Members grouped by line
             self.indent_level += 1;
+
+            // Generate nested types first (they're typically declared at the top)
+            for nested in &compound.nested_types {
+                self.generate_compound(nested);
+                self.output.push('\n');
+            }
+
+            // Members grouped by line
             let member_refs: Vec<_> = compound.members.iter().collect();
             self.generate_members(&member_refs);
             self.indent_level -= 1;
@@ -597,10 +625,11 @@ impl CodeGenerator {
     }
 
     fn generate_class(&mut self, compound: &Compound) {
-        // Check if this is a forward declaration (no members, no methods, no base classes)
+        // Check if this is a forward declaration (no members, no methods, no base classes, no nested types)
         let is_forward_decl = compound.members.is_empty()
             && compound.methods.is_empty()
-            && compound.base_classes.is_empty();
+            && compound.base_classes.is_empty()
+            && compound.nested_types.is_empty();
 
         if is_forward_decl {
             // Forward declaration - just output "class ClassName;"
@@ -662,6 +691,17 @@ impl CodeGenerator {
         }
 
         self.write_line(&opening);
+
+        // Generate nested types first (they're typically declared at the top of the class)
+        // Nested types default to private accessibility in classes
+        if !compound.nested_types.is_empty() {
+            self.indent_level += 1;
+            for nested in &compound.nested_types {
+                self.generate_compound(nested);
+                self.output.push('\n');
+            }
+            self.indent_level -= 1;
+        }
 
         // Group members and methods by accessibility
         // Default accessibility: struct = public, class = private

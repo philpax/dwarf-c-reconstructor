@@ -348,6 +348,7 @@ pub struct Compound {
     pub compound_type: String, // "struct", "union", "enum", "class"
     pub members: Vec<Variable>,
     pub methods: Vec<Function>,
+    pub nested_types: Vec<Compound>, // Nested structs, classes, unions, enums
     pub enum_values: Vec<(String, Option<i64>)>,
     pub line: Option<u64>,
     pub is_typedef: bool,

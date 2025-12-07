@@ -1042,6 +1042,7 @@ impl<'a> DwarfParser<'a> {
         let mut members = Vec::new();
         let mut methods = Vec::new();
         let mut base_classes = Vec::new();
+        let mut nested_types = Vec::new();
         let mut is_virtual = false;
         let mut absolute_depth = 1; // We start at the struct/union level (depth 1 from compile unit)
 
@@ -1085,6 +1086,30 @@ impl<'a> DwarfParser<'a> {
                             base_classes.push(base);
                         }
                     }
+                    gimli::DW_TAG_structure_type => {
+                        // Nested struct
+                        if let Some(compound) = self.parse_compound_at(unit, offset, "struct")? {
+                            nested_types.push(compound);
+                        }
+                    }
+                    gimli::DW_TAG_class_type => {
+                        // Nested class
+                        if let Some(compound) = self.parse_compound_at(unit, offset, "class")? {
+                            nested_types.push(compound);
+                        }
+                    }
+                    gimli::DW_TAG_union_type => {
+                        // Nested union
+                        if let Some(compound) = self.parse_compound_at(unit, offset, "union")? {
+                            nested_types.push(compound);
+                        }
+                    }
+                    gimli::DW_TAG_enumeration_type => {
+                        // Nested enum
+                        if let Some(compound) = self.parse_enum_at(unit, offset)? {
+                            nested_types.push(compound);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1095,6 +1120,7 @@ impl<'a> DwarfParser<'a> {
             compound_type: metadata.compound_type,
             members,
             methods,
+            nested_types,
             enum_values: Vec::new(),
             line: metadata.line,
             is_typedef: metadata.is_typedef,
@@ -1162,6 +1188,7 @@ impl<'a> DwarfParser<'a> {
             compound_type: metadata.compound_type,
             members: Vec::new(),
             methods: Vec::new(),
+            nested_types: Vec::new(),
             enum_values,
             line: metadata.line,
             is_typedef: metadata.is_typedef,
