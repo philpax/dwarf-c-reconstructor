@@ -705,6 +705,11 @@ impl<'a> DwarfParser<'a> {
                 let offset = child_entry.offset();
 
                 match tag {
+                    gimli::DW_TAG_namespace => {
+                        if let Some(ns) = self.parse_namespace_at(unit, offset)? {
+                            children.push(Element::Namespace(ns));
+                        }
+                    }
                     gimli::DW_TAG_structure_type => {
                         if let Some(compound) = self.parse_compound_at(unit, offset, "struct")? {
                             children.push(Element::Compound(compound));
@@ -715,9 +720,29 @@ impl<'a> DwarfParser<'a> {
                             children.push(Element::Compound(compound));
                         }
                     }
+                    gimli::DW_TAG_union_type => {
+                        if let Some(compound) = self.parse_compound_at(unit, offset, "union")? {
+                            children.push(Element::Compound(compound));
+                        }
+                    }
+                    gimli::DW_TAG_enumeration_type => {
+                        if let Some(compound) = self.parse_enum_at(unit, offset)? {
+                            children.push(Element::Compound(compound));
+                        }
+                    }
                     gimli::DW_TAG_subprogram => {
                         if let Some(func) = self.parse_function_at(unit, offset, false)? {
                             children.push(Element::Function(func));
+                        }
+                    }
+                    gimli::DW_TAG_variable => {
+                        if let Some(var) = self.parse_variable(unit, child_entry)? {
+                            children.push(Element::Variable(var));
+                        }
+                    }
+                    gimli::DW_TAG_typedef => {
+                        if let Some(typedef_alias) = self.parse_typedef_alias(unit, child_entry)? {
+                            children.push(Element::TypedefAlias(typedef_alias));
                         }
                     }
                     _ => {}
