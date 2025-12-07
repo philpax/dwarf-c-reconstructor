@@ -13,6 +13,7 @@ pub struct CodeGenConfig {
     pub no_function_prototypes: bool,
     pub pointer_size: u64, // 4 for 32-bit, 8 for 64-bit
     pub disable_no_line_comment: bool,
+    pub verbose_class_usage: bool, // Include "class ", "struct ", etc. prefixes in type references
 }
 
 impl Default for CodeGenConfig {
@@ -24,6 +25,7 @@ impl Default for CodeGenConfig {
             no_function_prototypes: false,
             pointer_size: 4, // Default to 32-bit for backwards compatibility
             disable_no_line_comment: false,
+            verbose_class_usage: false, // Don't include "class " etc. prefixes by default
         }
     }
 }
@@ -80,26 +82,54 @@ impl CodeGenerator {
         }
     }
 
+    /// Strip "class ", "struct ", "union ", "enum " prefixes from type names
+    /// when verbose_class_usage is disabled (the default).
+    fn strip_compound_prefix(&self, type_name: &str) -> String {
+        if self.config.verbose_class_usage {
+            return type_name.to_string();
+        }
+
+        // Strip compound type prefixes
+        for prefix in &["class ", "struct ", "union ", "enum "] {
+            if let Some(stripped) = type_name.strip_prefix(prefix) {
+                return stripped.to_string();
+            }
+        }
+
+        type_name.to_string()
+    }
+
+    /// Apply type transformations: shorten int types and/or strip compound prefixes
+    fn transform_type_name(&self, type_name: &str) -> String {
+        let mut result = type_name.to_string();
+
+        // First strip compound prefixes (unless verbose_class_usage is enabled)
+        result = self.strip_compound_prefix(&result);
+
+        // Then apply int type shortening if enabled
+        if self.config.shorten_int_types {
+            result = self.shorten_type_name(&result);
+        }
+
+        result
+    }
+
     fn format_type_string(&self, type_info: &TypeInfo, var_name: &str) -> String {
-        if !self.config.shorten_int_types {
-            return type_info.to_string(var_name);
-        }
+        // Clone type_info and transform the base type
+        let mut transformed_type = type_info.clone();
+        transformed_type.base_type = self.transform_type_name(&type_info.base_type);
 
-        // Clone type_info and shorten the base type
-        let mut shortened_type = type_info.clone();
-        shortened_type.base_type = self.shorten_type_name(&type_info.base_type);
-
-        // For function pointers, also shorten return type and parameter types
-        if shortened_type.is_function_pointer {
-            if let Some(ref mut ret_type) = shortened_type.function_return_type {
-                ret_type.base_type = self.shorten_type_name(&ret_type.base_type);
+        // For function pointers, also transform return type and parameter types
+        if transformed_type.is_function_pointer {
+            if let Some(ref mut ret_type) = transformed_type.function_return_type {
+                ret_type.base_type = self.transform_type_name(&ret_type.base_type);
             }
-            for param in &mut shortened_type.function_params {
-                param.base_type = self.shorten_type_name(&param.base_type);
+            for param in &mut transformed_type.function_params {
+                param.base_type = self.transform_type_name(&param.base_type);
             }
         }
 
-        shortened_type.to_string(var_name)
+        transformed_type.to_string(var_name)
     }
 
     fn write_line(&mut self, line: &str) {
@@ -916,8 +946,8 @@ impl CodeGenerator {
                             var_names.push(name_with_array);
                         }
 
-                        let shortened_base = self.shorten_type_name(&base_type.base_type);
-                        let mut decl = shortened_base;
+                        let transformed_base = self.transform_type_name(&base_type.base_type);
+                        let mut decl = transformed_base;
                         decl.push(' ');
                         decl.push_str(&var_names.join(", "));
                         decls.push((decl, Some(group[0].1)));
@@ -1023,8 +1053,8 @@ impl CodeGenerator {
                             var_names.push(name_with_array);
                         }
 
-                        let shortened_base = self.shorten_type_name(&base_type.base_type);
-                        let mut decl = shortened_base;
+                        let transformed_base = self.transform_type_name(&base_type.base_type);
+                        let mut decl = transformed_base;
                         decl.push(' ');
                         decl.push_str(&var_names.join(", "));
                         decls.push(decl);
@@ -1067,10 +1097,10 @@ impl CodeGenerator {
             decl.push_str("virtual ");
         }
 
-        // Return type (skip for constructors/destructors, apply type shortening)
+        // Return type (skip for constructors/destructors, apply type transformations)
         // For return types, pointer/reference stays with the type (e.g., int* func())
         if !is_constructor && !func.is_destructor {
-            decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
+            decl.push_str(&self.transform_type_name(&func.return_type.base_type));
             if func.return_type.is_rvalue_reference {
                 decl.push_str("&&");
             } else if func.return_type.is_reference {
@@ -1261,10 +1291,10 @@ impl CodeGenerator {
         // Detect constructor: name matches class name
         let is_constructor = func.class_name.as_ref() == Some(&func.name);
 
-        // Return type (skip for constructors/destructors, apply type shortening)
+        // Return type (skip for constructors/destructors, apply type transformations)
         // For return types, pointer/reference stays with the type (e.g., int* func())
         if !is_constructor && !func.is_destructor {
-            decl.push_str(&self.shorten_type_name(&func.return_type.base_type));
+            decl.push_str(&self.transform_type_name(&func.return_type.base_type));
             if func.return_type.is_rvalue_reference {
                 decl.push_str("&&");
             } else if func.return_type.is_reference {
@@ -1677,9 +1707,9 @@ impl CodeGenerator {
                             var_names.push(name_with_array);
                         }
 
-                        // Apply type shortening to the base type
-                        let shortened_base = self.shorten_type_name(&base_type.base_type);
-                        let mut decl = shortened_base;
+                        // Apply type transformations to the base type
+                        let transformed_base = self.transform_type_name(&base_type.base_type);
+                        let mut decl = transformed_base;
                         decl.push(' ');
                         decl.push_str(&var_names.join(", "));
                         decls.push(decl);
