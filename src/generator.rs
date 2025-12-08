@@ -14,6 +14,7 @@ pub struct CodeGenConfig {
     pub pointer_size: u64, // 4 for 32-bit, 8 for 64-bit
     pub disable_no_line_comment: bool,
     pub verbose_class_usage: bool, // Include "class ", "struct ", etc. prefixes in type references
+    pub skip_namespace_indentation: bool, // Don't indent content inside namespaces
 }
 
 impl Default for CodeGenConfig {
@@ -26,6 +27,7 @@ impl Default for CodeGenConfig {
             pointer_size: 4, // Default to 32-bit for backwards compatibility
             disable_no_line_comment: false,
             verbose_class_usage: false, // Don't include "class " etc. prefixes by default
+            skip_namespace_indentation: false, // Indent namespace content by default
         }
     }
 }
@@ -441,7 +443,9 @@ impl CodeGenerator {
     fn generate_namespace(&mut self, ns: &Namespace) {
         let line_comment = ns.line.map(|l| format!("//{}", l)).unwrap_or_default();
         self.write_line(&format!("namespace {} {{ {}", ns.name, line_comment));
-        self.indent_level += 1;
+        if !self.config.skip_namespace_indentation {
+            self.indent_level += 1;
+        }
 
         for (i, child) in ns.children.iter().enumerate() {
             if i > 0 {
@@ -450,7 +454,9 @@ impl CodeGenerator {
             self.generate_element(child);
         }
 
-        self.indent_level -= 1;
+        if !self.config.skip_namespace_indentation {
+            self.indent_level -= 1;
+        }
         self.write_line(&format!("}} //{}", ns.name));
     }
 
@@ -1217,7 +1223,9 @@ impl CodeGenerator {
         // Open namespace blocks
         for ns in &func.namespace_path {
             self.write_line(&format!("namespace {} {{", ns));
-            self.indent_level += 1;
+            if !self.config.skip_namespace_indentation {
+                self.indent_level += 1;
+            }
         }
 
         // Generate the function
@@ -1225,7 +1233,9 @@ impl CodeGenerator {
 
         // Close namespace blocks in reverse order
         for ns in func.namespace_path.iter().rev() {
-            self.indent_level -= 1;
+            if !self.config.skip_namespace_indentation {
+                self.indent_level -= 1;
+            }
             self.write_line(&format!("}} //{}", ns));
         }
     }

@@ -119,6 +119,10 @@ struct Args {
     /// Include "class ", "struct ", "union ", "enum " prefixes in type references
     #[arg(long)]
     verbose_class_usage: bool,
+
+    /// Skip indentation inside namespaces (content starts at column 0)
+    #[arg(long)]
+    skip_namespace_indentation: bool,
 }
 
 /// Get the decl_file for an element (recursively checks namespace children)
@@ -261,6 +265,7 @@ fn main() -> Result<()> {
         pointer_size,
         disable_no_line_comment: args.disable_no_line_comment,
         verbose_class_usage: args.verbose_class_usage,
+        skip_namespace_indentation: args.skip_namespace_indentation,
     };
 
     for cu in &compile_units {
