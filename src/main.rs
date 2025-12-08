@@ -72,6 +72,11 @@ fn parse_archive(archive: ArchiveFile<'_>, archive_data: &[u8]) -> Result<Vec<ty
         }
     }
 
+    // Perform cross-CU matching across all object files in the archive.
+    // This is necessary because class declarations and method definitions
+    // may be in different object files (e.g., header.o vs implementation.o).
+    parser::DwarfParser::cross_cu_match_method_definitions(&mut all_compile_units);
+
     Ok(all_compile_units)
 }
 

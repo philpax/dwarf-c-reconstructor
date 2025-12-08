@@ -198,7 +198,10 @@ impl<'a> DwarfParser<'a> {
     /// Match method declarations across all CUs using linkage names
     /// This handles cases where a header is included in multiple CUs but the method
     /// definitions are only in one CU (the .cpp file)
-    fn cross_cu_match_method_definitions(compile_units: &mut [CompileUnit]) {
+    ///
+    /// Note: This is public because it needs to be called after parsing all object files
+    /// in an archive, where CUs from different object files need to be matched together.
+    pub fn cross_cu_match_method_definitions(compile_units: &mut [CompileUnit]) {
         use std::collections::HashMap;
 
         fn collect_definitions(
@@ -208,9 +211,13 @@ impl<'a> DwarfParser<'a> {
             for element in elements {
                 match element {
                     Element::Function(func) => {
-                        // Only index method definitions (those with specification_offset, meaning
-                        // they reference a class declaration)
-                        if func.is_method && func.specification_offset.is_some() {
+                        // Index any function that has parameters and a linkage name.
+                        // This handles both:
+                        // 1. Method definitions with specification_offset
+                        // 2. Functions that might match method declarations across CUs
+                        //    (where the definition may not have is_method set if the class
+                        //    declaration is in a different CU)
+                        if !func.parameters.is_empty() {
                             if let Some(ref linkage_name) = func.linkage_name {
                                 definitions
                                     .entry(linkage_name.clone())
