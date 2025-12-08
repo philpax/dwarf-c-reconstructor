@@ -527,6 +527,11 @@ impl CodeGenerator {
     fn generate_struct_or_union(&mut self, compound: &Compound, use_typedef: bool) {
         if compound.members.is_empty() && compound.nested_types.is_empty() {
             // Empty struct/union - just output typedef or declaration
+            // Skip unnamed forward declarations as they generate invalid C code like "struct;"
+            if compound.name.is_none() && compound.typedef_name.is_none() {
+                return;
+            }
+
             let mut line = String::new();
 
             if use_typedef {
