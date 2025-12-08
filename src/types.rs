@@ -63,6 +63,7 @@ pub struct MethodDefinition {
     pub low_pc: Option<u64>,
     pub high_pc: Option<u64>,
     pub line: Option<u64>,
+    pub namespace_path: Vec<String>,
 }
 
 impl MethodDefinition {
@@ -78,6 +79,7 @@ impl MethodDefinition {
             low_pc: func.low_pc,
             high_pc: func.high_pc,
             line: func.line,
+            namespace_path: func.namespace_path.clone(),
         }
     }
 
@@ -94,6 +96,10 @@ impl MethodDefinition {
         // Use line from definition if declaration doesn't have one
         if method.line.is_none() {
             method.line = self.line;
+        }
+        // Propagate namespace_path from definition if method doesn't have one
+        if method.namespace_path.is_empty() && !self.namespace_path.is_empty() {
+            method.namespace_path = self.namespace_path.clone();
         }
     }
 }
@@ -318,6 +324,7 @@ pub struct Function {
     pub line: Option<u64>,
     pub is_method: bool,
     pub class_name: Option<String>,
+    pub namespace_path: Vec<String>, // Namespace path for the class (e.g., ["MyNamespace", "Inner"])
     pub accessibility: Option<String>,
     pub has_body: bool,
     pub low_pc: Option<u64>,

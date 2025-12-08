@@ -275,6 +275,14 @@ impl<'a> DwarfParser<'a> {
 
     /// Match method declarations in classes with their definitions at top level
     fn match_method_definitions(elements: &mut [Element]) {
+        Self::match_method_definitions_with_namespace(elements, &[]);
+    }
+
+    /// Match method declarations with definitions, tracking namespace path
+    fn match_method_definitions_with_namespace(
+        elements: &mut [Element],
+        current_namespace: &[String],
+    ) {
         use std::collections::HashMap;
 
         // Build maps of definitions:
@@ -283,29 +291,57 @@ impl<'a> DwarfParser<'a> {
         let mut definitions_by_linkage: HashMap<String, MethodDefinition> = HashMap::new();
         let mut definitions_by_spec_offset: HashMap<usize, MethodDefinition> = HashMap::new();
 
-        for element in elements.iter() {
-            if let Element::Function(func) = element {
-                let definition_data = MethodDefinition::from_function(func);
+        fn collect_definitions(
+            elements: &[Element],
+            definitions_by_linkage: &mut HashMap<String, MethodDefinition>,
+            definitions_by_spec_offset: &mut HashMap<usize, MethodDefinition>,
+        ) {
+            for element in elements.iter() {
+                match element {
+                    Element::Function(func) => {
+                        let definition_data = MethodDefinition::from_function(func);
 
-                // If this function has a specification_offset, it's a definition referencing a declaration
-                if let Some(spec_offset) = func.specification_offset {
-                    definitions_by_spec_offset.insert(spec_offset, definition_data.clone());
-                }
+                        // If this function has a specification_offset, it's a definition referencing a declaration
+                        if let Some(spec_offset) = func.specification_offset {
+                            definitions_by_spec_offset.insert(spec_offset, definition_data.clone());
+                        }
 
-                // Also index by linkage name for backwards compatibility
-                if let Some(ref linkage_name) = func.linkage_name {
-                    if !func.is_method || func.specification_offset.is_some() {
-                        definitions_by_linkage.insert(linkage_name.clone(), definition_data);
+                        // Also index by linkage name for backwards compatibility
+                        if let Some(ref linkage_name) = func.linkage_name {
+                            if !func.is_method || func.specification_offset.is_some() {
+                                definitions_by_linkage
+                                    .insert(linkage_name.clone(), definition_data);
+                            }
+                        }
                     }
+                    Element::Namespace(ns) => {
+                        collect_definitions(
+                            &ns.children,
+                            definitions_by_linkage,
+                            definitions_by_spec_offset,
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
+
+        collect_definitions(
+            elements,
+            &mut definitions_by_linkage,
+            &mut definitions_by_spec_offset,
+        );
 
         // Match methods with definitions
         for element in elements.iter_mut() {
             match element {
                 Element::Compound(compound) => {
                     for method in &mut compound.methods {
+                        // Set namespace_path for methods inside classes
+                        if method.namespace_path.is_empty() && !current_namespace.is_empty() {
+                            method.namespace_path = current_namespace.to_vec();
+                        }
+
                         // First try to match by decl_offset (specification_offset on definition points to this)
                         let matched = if let Some(decl_offset) = method.decl_offset {
                             if let Some(def) = definitions_by_spec_offset.get(&decl_offset) {
@@ -329,64 +365,91 @@ impl<'a> DwarfParser<'a> {
                     }
                 }
                 Element::Namespace(ns) => {
-                    Self::match_method_definitions(&mut ns.children);
+                    let mut new_namespace = current_namespace.to_vec();
+                    new_namespace.push(ns.name.clone());
+                    Self::match_method_definitions_with_namespace(&mut ns.children, &new_namespace);
                 }
                 _ => {}
             }
         }
 
-        // Build mapping from decl_offset to class name for marking top-level functions
-        let mut class_by_decl_offset: HashMap<usize, String> = HashMap::new();
-        let mut class_by_linkage: HashMap<String, String> = HashMap::new();
+        // Build mapping from decl_offset/linkage_name to (class_name, namespace_path) for marking top-level functions
+        let mut class_info_by_decl_offset: HashMap<usize, (String, Vec<String>)> = HashMap::new();
+        let mut class_info_by_linkage: HashMap<String, (String, Vec<String>)> = HashMap::new();
 
         fn collect_class_methods(
             elements: &[Element],
-            class_by_decl_offset: &mut HashMap<usize, String>,
-            class_by_linkage: &mut HashMap<String, String>,
+            current_namespace: &[String],
+            class_info_by_decl_offset: &mut HashMap<usize, (String, Vec<String>)>,
+            class_info_by_linkage: &mut HashMap<String, (String, Vec<String>)>,
         ) {
             for element in elements.iter() {
                 match element {
                     Element::Compound(compound) => {
                         if let Some(ref class_name) = compound.name {
                             for method in &compound.methods {
+                                let ns_path = if !method.namespace_path.is_empty() {
+                                    method.namespace_path.clone()
+                                } else {
+                                    current_namespace.to_vec()
+                                };
+
                                 if let Some(decl_offset) = method.decl_offset {
-                                    class_by_decl_offset.insert(decl_offset, class_name.clone());
+                                    class_info_by_decl_offset
+                                        .insert(decl_offset, (class_name.clone(), ns_path.clone()));
                                 }
                                 if let Some(ref linkage_name) = method.linkage_name {
-                                    class_by_linkage
-                                        .insert(linkage_name.clone(), class_name.clone());
+                                    class_info_by_linkage.insert(
+                                        linkage_name.clone(),
+                                        (class_name.clone(), ns_path.clone()),
+                                    );
                                 }
                             }
                         }
                     }
                     Element::Namespace(ns) => {
-                        collect_class_methods(&ns.children, class_by_decl_offset, class_by_linkage);
+                        let mut new_namespace = current_namespace.to_vec();
+                        new_namespace.push(ns.name.clone());
+                        collect_class_methods(
+                            &ns.children,
+                            &new_namespace,
+                            class_info_by_decl_offset,
+                            class_info_by_linkage,
+                        );
                     }
                     _ => {}
                 }
             }
         }
 
-        collect_class_methods(elements, &mut class_by_decl_offset, &mut class_by_linkage);
+        collect_class_methods(
+            elements,
+            current_namespace,
+            &mut class_info_by_decl_offset,
+            &mut class_info_by_linkage,
+        );
 
-        // Mark top-level functions that are method definitions and set their class_name
+        // Mark top-level functions that are method definitions and set their class_name and namespace_path
         for element in elements.iter_mut() {
             if let Element::Function(func) = element {
                 // If the function doesn't have a class_name yet, try to find it
                 if func.class_name.is_none() {
                     // Try to match by specification_offset first, then by linkage_name
-                    let class_name = func
+                    let class_info = func
                         .specification_offset
-                        .and_then(|offset| class_by_decl_offset.get(&offset).cloned())
+                        .and_then(|offset| class_info_by_decl_offset.get(&offset).cloned())
                         .or_else(|| {
                             func.linkage_name
                                 .as_ref()
-                                .and_then(|name| class_by_linkage.get(name).cloned())
+                                .and_then(|name| class_info_by_linkage.get(name).cloned())
                         });
 
-                    if let Some(class_name) = class_name {
+                    if let Some((class_name, namespace_path)) = class_info {
                         func.is_method = true;
                         func.class_name = Some(class_name);
+                        if func.namespace_path.is_empty() {
+                            func.namespace_path = namespace_path;
+                        }
                     }
                 }
             }
@@ -1487,6 +1550,7 @@ impl<'a> DwarfParser<'a> {
             line: metadata.line,
             is_method: metadata.is_method,
             class_name: None,
+            namespace_path: Vec::new(),
             accessibility: metadata.accessibility,
             has_body: metadata.has_body,
             low_pc: metadata.low_pc,
