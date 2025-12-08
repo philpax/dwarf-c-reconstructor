@@ -1204,6 +1204,33 @@ impl CodeGenerator {
     }
 
     fn generate_function(&mut self, func: &Function) {
+        // If this is a method definition with a namespace path, wrap it in namespace blocks
+        if func.is_method && !func.namespace_path.is_empty() {
+            self.generate_function_with_namespace(func);
+        } else {
+            self.generate_function_impl(func);
+        }
+    }
+
+    /// Generate a function wrapped in namespace blocks
+    fn generate_function_with_namespace(&mut self, func: &Function) {
+        // Open namespace blocks
+        for ns in &func.namespace_path {
+            self.write_line(&format!("namespace {} {{", ns));
+            self.indent_level += 1;
+        }
+
+        // Generate the function
+        self.generate_function_impl(func);
+
+        // Close namespace blocks in reverse order
+        for ns in func.namespace_path.iter().rev() {
+            self.indent_level -= 1;
+            self.write_line(&format!("}} //{}", ns));
+        }
+    }
+
+    fn generate_function_impl(&mut self, func: &Function) {
         // Write address comment above function if available and not disabled
         if !self.config.no_function_addresses {
             if let (Some(low), Some(high)) = (func.low_pc, func.high_pc) {
