@@ -191,44 +191,96 @@ fn split_namespace_by_file(ns: &Namespace) -> NamespaceByFile {
     }
 }
 
-/// Merge namespaces with the same name in a list of elements.
-/// This prevents duplicate namespace blocks in the output.
+/// Generate a unique key for an element, used for deduplication.
+fn element_key(element: &Element) -> Option<String> {
+    match element {
+        Element::Compound(c) => {
+            // Key based on name and compound type
+            // For typedef compounds (e.g., typedef struct { } Foo;), use typedef_name
+            let name = c.name.as_ref().or(c.typedef_name.as_ref());
+            name.map(|n| format!("{}:{}", c.compound_type, n))
+        }
+        Element::TypedefAlias(t) => Some(format!("typedef:{}", t.name)),
+        Element::Function(f) => {
+            // Key based on linkage name if available, otherwise name
+            Some(format!(
+                "func:{}",
+                f.linkage_name.as_ref().unwrap_or(&f.name)
+            ))
+        }
+        Element::Variable(v) => Some(format!("var:{}", v.name)),
+        Element::Namespace(_) => None, // Namespaces are handled separately by merging
+    }
+}
+
+/// Merge namespaces with the same name and deduplicate other elements.
+/// This prevents duplicate definitions in the output when elements from
+/// multiple compile units are merged together.
 fn merge_namespaces(elements: Vec<Element>) -> Vec<Element> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
 
     // Separate namespaces from other elements
-    let mut namespaces_by_name: BTreeMap<String, Namespace> = BTreeMap::new();
+    let mut namespaces_by_name: BTreeMap<String, (Namespace, HashSet<String>)> = BTreeMap::new();
     let mut other_elements: Vec<Element> = Vec::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
 
     for element in elements {
         match element {
             Element::Namespace(ns) => {
                 // If we already have a namespace with this name, merge the children
-                if let Some(existing) = namespaces_by_name.get_mut(&ns.name) {
-                    // Recursively merge children (which may contain nested namespaces)
-                    let merged_children = merge_namespaces(ns.children);
-                    existing.children.extend(merged_children);
+                if let Some((existing, existing_keys)) = namespaces_by_name.get_mut(&ns.name) {
+                    // Add new children, deduplicating against existing
+                    for child in ns.children {
+                        if let Element::Namespace(_) = &child {
+                            // Namespaces will be merged recursively, always add them
+                            existing.children.push(child);
+                        } else if let Some(key) = element_key(&child) {
+                            if existing_keys.insert(key) {
+                                existing.children.push(child);
+                            }
+                            // Skip duplicates
+                        } else {
+                            existing.children.push(child);
+                        }
+                    }
                     // Use the earlier line number
                     if ns.line < existing.line {
                         existing.line = ns.line;
                     }
                 } else {
-                    // First time seeing this namespace - recursively merge its children
-                    let mut merged_ns = ns;
-                    merged_ns.children = merge_namespaces(merged_ns.children);
-                    namespaces_by_name.insert(merged_ns.name.clone(), merged_ns);
+                    // First time seeing this namespace - collect keys from children
+                    let mut child_keys: HashSet<String> = HashSet::new();
+                    for child in &ns.children {
+                        if let Some(key) = element_key(child) {
+                            child_keys.insert(key);
+                        }
+                    }
+                    namespaces_by_name.insert(ns.name.clone(), (ns, child_keys));
                 }
             }
             _ => {
-                other_elements.push(element);
+                // Deduplicate non-namespace elements
+                if let Some(key) = element_key(&element) {
+                    if seen_keys.insert(key) {
+                        // First time seeing this element
+                        other_elements.push(element);
+                    }
+                    // Skip duplicates
+                } else {
+                    // No key (shouldn't happen for non-namespace elements)
+                    other_elements.push(element);
+                }
             }
         }
     }
 
-    // Combine: namespaces first (sorted by name), then other elements
+    // Recursively merge nested namespaces in each namespace's children
     let mut result: Vec<Element> = namespaces_by_name
         .into_values()
-        .map(Element::Namespace)
+        .map(|(mut ns, _)| {
+            ns.children = merge_namespaces(ns.children);
+            Element::Namespace(ns)
+        })
         .collect();
     result.extend(other_elements);
 
@@ -318,6 +370,10 @@ fn main() -> Result<()> {
         skip_namespace_indentation: args.skip_namespace_indentation,
     };
 
+    // First pass: collect all header file elements from all compile units
+    // Map from normalized path to (elements, original_path)
+    let mut header_elements: HashMap<String, (Vec<Element>, String)> = HashMap::new();
+
     for cu in &compile_units {
         // Group elements by declaration file, properly handling namespaces
         // by splitting their children by decl_file
@@ -326,11 +382,11 @@ fn main() -> Result<()> {
         // Normalize the compile unit path
         let cu_path_normalized = normalize_path(&cu.name);
 
-        // Generate header files for each file in the file table
+        // Collect header file elements
         for (file_idx, file_path) in cu.file_table.iter().enumerate() {
             let file_index = (file_idx + 1) as u64; // File table is 1-indexed
 
-            // Skip the compile unit's own file - it will be generated later
+            // Skip the compile unit's own file - it will be generated separately
             let header_path_normalized = normalize_path(file_path);
             if header_path_normalized == cu_path_normalized {
                 continue;
@@ -338,30 +394,51 @@ fn main() -> Result<()> {
 
             if let Some(elements) = elements_by_file.get(&Some(file_index)) {
                 if !elements.is_empty() {
-                    let mut generator =
-                        CodeGenerator::with_config(type_sizes.clone(), config.clone());
-
-                    // Generate header content
-                    generator.generate_header_comment(&cu.name, file_path);
-
-                    // Merge namespaces with the same name and generate elements
-                    let merged_elements = merge_namespaces(elements.clone());
-                    let element_refs: Vec<&types::Element> = merged_elements.iter().collect();
-                    generator.generate_elements(&element_refs);
-
-                    // Determine output path for header file
-                    let output_path = output_dir.join(&header_path_normalized);
-
-                    // Create parent directories if they don't exist
-                    if let Some(parent) = output_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-
-                    fs::write(&output_path, generator.get_output())?;
-                    println!("Generated: {} (from {})", output_path.display(), file_path);
+                    let entry = header_elements
+                        .entry(header_path_normalized)
+                        .or_insert_with(|| (Vec::new(), file_path.clone()));
+                    entry.0.extend(elements.iter().cloned());
                 }
             }
         }
+    }
+
+    // Generate merged header files
+    for (normalized_path, (elements, original_path)) in &header_elements {
+        let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
+
+        // Generate header comment (use original path for display)
+        generator.generate_header_comment_simple(original_path);
+
+        // Merge namespaces with the same name and generate elements
+        let merged_elements = merge_namespaces(elements.clone());
+        let element_refs: Vec<&types::Element> = merged_elements.iter().collect();
+        generator.generate_elements(&element_refs);
+
+        // Determine output path for header file
+        let output_path = output_dir.join(normalized_path);
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::write(&output_path, generator.get_output())?;
+        println!(
+            "Generated: {} (from {})",
+            output_path.display(),
+            original_path
+        );
+    }
+
+    // Second pass: generate source files for each compile unit
+    for cu in &compile_units {
+        // Group elements by declaration file, properly handling namespaces
+        // by splitting their children by decl_file
+        let elements_by_file = group_elements_by_file(&cu.elements);
+
+        // Normalize the compile unit path
+        let cu_path_normalized = normalize_path(&cu.name);
 
         // Generate main source file with elements from the compile unit itself
         // Find the file index for the compile unit (if it exists in the file table)

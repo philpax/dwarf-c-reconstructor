@@ -390,10 +390,9 @@ impl CodeGenerator {
         self.write_line_comment("", &cu.name);
     }
 
-    /// Generate a header file comment
-    pub fn generate_header_comment(&mut self, cu_name: &str, header_path: &str) {
+    /// Generate a simple header file comment (for merged headers from multiple compile units)
+    pub fn generate_header_comment_simple(&mut self, header_path: &str) {
         self.write_line_comment("", header_path);
-        self.write_line(&format!("// Extracted from compile unit: {}", cu_name));
         self.output.push('\n');
     }
 
