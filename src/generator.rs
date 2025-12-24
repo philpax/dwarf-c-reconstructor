@@ -636,7 +636,12 @@ impl CodeGenerator {
                             base_str.push_str("virtual ");
                         }
 
-                        base_str.push_str(&base.type_name);
+                        // Always strip "class " prefix in inheritance (never needed syntactically)
+                        let base_type = base
+                            .type_name
+                            .strip_prefix("class ")
+                            .unwrap_or(&base.type_name);
+                        base_str.push_str(base_type);
 
                         // Add offset comment if available
                         if let Some(offset) = base.offset {
@@ -741,7 +746,12 @@ impl CodeGenerator {
                         base_str.push_str("virtual ");
                     }
 
-                    base_str.push_str(&base.type_name);
+                    // Always strip "class " prefix in inheritance (never needed syntactically)
+                    let base_type = base
+                        .type_name
+                        .strip_prefix("class ")
+                        .unwrap_or(&base.type_name);
+                    base_str.push_str(base_type);
 
                     // Add offset comment if available
                     if let Some(offset) = base.offset {
