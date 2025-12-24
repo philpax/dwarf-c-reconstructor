@@ -456,6 +456,9 @@ impl CodeGenerator {
         self.write_line(&format!("namespace {} {{ {}", ns.name, line_comment));
         if !self.config.skip_namespace_indentation {
             self.indent_level += 1;
+        } else {
+            // Add empty line after opening bracket when skipping indentation
+            self.output.push('\n');
         }
 
         // Sort namespace children by line number (maintain DWARF order for same line)
@@ -480,6 +483,9 @@ impl CodeGenerator {
 
         if !self.config.skip_namespace_indentation {
             self.indent_level -= 1;
+        } else {
+            // Add empty line before closing bracket when skipping indentation
+            self.output.push('\n');
         }
         self.write_line(&format!("}} //{}", ns.name));
     }
@@ -1249,6 +1255,9 @@ impl CodeGenerator {
             self.write_line(&format!("namespace {} {{", ns));
             if !self.config.skip_namespace_indentation {
                 self.indent_level += 1;
+            } else {
+                // Add empty line after opening bracket when skipping indentation
+                self.output.push('\n');
             }
         }
 
@@ -1259,6 +1268,9 @@ impl CodeGenerator {
         for ns in func.namespace_path.iter().rev() {
             if !self.config.skip_namespace_indentation {
                 self.indent_level -= 1;
+            } else {
+                // Add empty line before closing bracket when skipping indentation
+                self.output.push('\n');
             }
             self.write_line(&format!("}} //{}", ns));
         }
