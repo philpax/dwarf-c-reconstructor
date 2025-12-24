@@ -13,7 +13,8 @@ pub struct CodeGenConfig {
     pub no_function_prototypes: bool,
     pub pointer_size: u64, // 4 for 32-bit, 8 for 64-bit
     pub disable_no_line_comment: bool,
-    pub verbose_class_usage: bool, // Include "class ", "struct ", etc. prefixes in type references
+    pub verbose_class_usage: bool, // Include "class " prefix in type references (C mode only)
+    pub code_style: String,        // "c" or "c++": controls which type prefixes to strip
     pub skip_namespace_indentation: bool, // Don't indent content inside namespaces
 }
 
@@ -26,7 +27,8 @@ impl Default for CodeGenConfig {
             no_function_prototypes: false,
             pointer_size: 4, // Default to 32-bit for backwards compatibility
             disable_no_line_comment: false,
-            verbose_class_usage: false, // Don't include "class " etc. prefixes by default
+            verbose_class_usage: false, // Don't include "class " prefix by default (C mode)
+            code_style: "c".to_string(), // Default to C style (keep struct/union/enum prefixes)
             skip_namespace_indentation: false, // Indent namespace content by default
         }
     }
@@ -84,18 +86,27 @@ impl CodeGenerator {
         }
     }
 
-    /// Strip "class ", "struct ", "union ", "enum " prefixes from type names
-    /// when verbose_class_usage is disabled (the default).
+    /// Strip type prefixes based on code_style and verbose_class_usage settings.
+    ///
+    /// - C style (default): Only strip "class " prefix, keep struct/union/enum.
+    ///   If verbose_class_usage is true, keep "class " prefix too.
+    /// - C++ style: Strip all prefixes (class/struct/union/enum), ignoring verbose_class_usage.
     fn strip_compound_prefix(&self, type_name: &str) -> String {
-        if self.config.verbose_class_usage {
-            return type_name.to_string();
-        }
-
-        // Strip compound type prefixes
-        for prefix in &["class ", "struct ", "union ", "enum "] {
-            if let Some(stripped) = type_name.strip_prefix(prefix) {
-                return stripped.to_string();
+        if self.config.code_style == "c++" {
+            // C++ style: strip all compound type prefixes
+            for prefix in &["class ", "struct ", "union ", "enum "] {
+                if let Some(stripped) = type_name.strip_prefix(prefix) {
+                    return stripped.to_string();
+                }
             }
+        } else {
+            // C style (default): only strip "class " prefix, unless verbose_class_usage is set
+            if !self.config.verbose_class_usage {
+                if let Some(stripped) = type_name.strip_prefix("class ") {
+                    return stripped.to_string();
+                }
+            }
+            // Keep struct/union/enum prefixes in C style
         }
 
         type_name.to_string()

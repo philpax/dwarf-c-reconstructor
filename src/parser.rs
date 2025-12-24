@@ -590,15 +590,12 @@ impl<'a> DwarfParser<'a> {
         Ok(file_table)
     }
 
-    #[allow(unused_variables)] // Statistics tracking variables for debugging
     fn parse_children(
         &mut self,
         unit: &DwarfUnit,
         entries: &mut gimli::EntriesCursor<DwarfReader>,
         elements: &mut Vec<Element>,
     ) -> Result<()> {
-        let mut total_depth1 = 0;
-        let mut captured = 0;
         let mut absolute_depth = 0; // Track absolute depth
 
         loop {
@@ -617,11 +614,8 @@ impl<'a> DwarfParser<'a> {
 
             // Only process direct children of compile unit (absolute depth == 1)
             if absolute_depth == 1 {
-                total_depth1 += 1;
                 let tag = entry.tag();
                 let offset = entry.offset();
-
-                let captured_before = elements.len();
 
                 match tag {
                     gimli::DW_TAG_namespace => {
@@ -676,10 +670,6 @@ impl<'a> DwarfParser<'a> {
                     _ => {
                         // Unhandled tag
                     }
-                }
-
-                if elements.len() > captured_before {
-                    captured += 1;
                 }
             }
         }
