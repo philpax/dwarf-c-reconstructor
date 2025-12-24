@@ -108,7 +108,7 @@ struct Args {
     #[arg(long)]
     no_function_prototypes: bool,
 
-    /// Enable all --no-* options (minimal output with no addresses, offsets, or prototypes)
+    /// Enable all --no-* options and --shorten-int-types (minimal output)
     #[arg(long)]
     minimal: bool,
 
@@ -116,9 +116,14 @@ struct Args {
     #[arg(long)]
     disable_no_line_comment: bool,
 
-    /// Include "class ", "struct ", "union ", "enum " prefixes in type references
+    /// Include "class " prefix in type references (only applies with --code-style=c)
     #[arg(long)]
     verbose_class_usage: bool,
+
+    /// Code style for type prefixes: 'c' keeps struct/union/enum prefixes (default),
+    /// 'c++' removes all prefixes. The 'class' prefix is only included with --verbose-class-usage in C mode.
+    #[arg(long, value_name = "STYLE", default_value = "c")]
+    code_style: String,
 
     /// Skip indentation inside namespaces (content starts at column 0)
     #[arg(long)]
@@ -265,6 +270,7 @@ fn main() -> Result<()> {
         pointer_size,
         disable_no_line_comment: args.disable_no_line_comment,
         verbose_class_usage: args.verbose_class_usage,
+        code_style: args.code_style.clone(),
         skip_namespace_indentation: args.skip_namespace_indentation,
     };
 
