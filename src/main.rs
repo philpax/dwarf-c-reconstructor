@@ -191,6 +191,50 @@ fn split_namespace_by_file(ns: &Namespace) -> NamespaceByFile {
     }
 }
 
+/// Merge namespaces with the same name in a list of elements.
+/// This prevents duplicate namespace blocks in the output.
+fn merge_namespaces(elements: Vec<Element>) -> Vec<Element> {
+    use std::collections::BTreeMap;
+
+    // Separate namespaces from other elements
+    let mut namespaces_by_name: BTreeMap<String, Namespace> = BTreeMap::new();
+    let mut other_elements: Vec<Element> = Vec::new();
+
+    for element in elements {
+        match element {
+            Element::Namespace(ns) => {
+                // If we already have a namespace with this name, merge the children
+                if let Some(existing) = namespaces_by_name.get_mut(&ns.name) {
+                    // Recursively merge children (which may contain nested namespaces)
+                    let merged_children = merge_namespaces(ns.children);
+                    existing.children.extend(merged_children);
+                    // Use the earlier line number
+                    if ns.line < existing.line {
+                        existing.line = ns.line;
+                    }
+                } else {
+                    // First time seeing this namespace - recursively merge its children
+                    let mut merged_ns = ns;
+                    merged_ns.children = merge_namespaces(merged_ns.children);
+                    namespaces_by_name.insert(merged_ns.name.clone(), merged_ns);
+                }
+            }
+            _ => {
+                other_elements.push(element);
+            }
+        }
+    }
+
+    // Combine: namespaces first (sorted by name), then other elements
+    let mut result: Vec<Element> = namespaces_by_name
+        .into_values()
+        .map(Element::Namespace)
+        .collect();
+    result.extend(other_elements);
+
+    result
+}
+
 /// Group elements by their declaration file, properly handling namespaces
 /// by splitting their children by decl_file and wrapping them in namespace elements
 fn group_elements_by_file(elements: &[Element]) -> HashMap<Option<u64>, Vec<Element>> {
@@ -300,8 +344,9 @@ fn main() -> Result<()> {
                     // Generate header content
                     generator.generate_header_comment(&cu.name, file_path);
 
-                    // Generate elements for this header (convert owned to refs)
-                    let element_refs: Vec<&types::Element> = elements.iter().collect();
+                    // Merge namespaces with the same name and generate elements
+                    let merged_elements = merge_namespaces(elements.clone());
+                    let element_refs: Vec<&types::Element> = merged_elements.iter().collect();
                     generator.generate_elements(&element_refs);
 
                     // Determine output path for header file
@@ -328,16 +373,17 @@ fn main() -> Result<()> {
             .map(|(idx, _)| (idx + 1) as u64);
 
         // Collect elements: those with no decl_file + those declared in the CU file itself
-        let mut main_elements: Vec<&types::Element> = Vec::new();
+        // We collect owned elements so we can merge namespaces with the same name
+        let mut main_elements_owned: Vec<types::Element> = Vec::new();
 
         // Add elements without decl_file
         if let Some(elems) = elements_by_file.get(&None) {
-            main_elements.extend(elems.iter());
+            main_elements_owned.extend(elems.iter().cloned());
         }
 
         // Add elements with decl_file = 0 (some DWARF producers use 0 for the CU file)
         if let Some(elems) = elements_by_file.get(&Some(0)) {
-            main_elements.extend(elems.iter());
+            main_elements_owned.extend(elems.iter().cloned());
         }
 
         // Add elements declared in the compile unit's own file
@@ -345,10 +391,14 @@ fn main() -> Result<()> {
             // Avoid double-counting if cu_idx is 0
             if cu_idx != 0 {
                 if let Some(elems) = elements_by_file.get(&Some(cu_idx)) {
-                    main_elements.extend(elems.iter());
+                    main_elements_owned.extend(elems.iter().cloned());
                 }
             }
         }
+
+        // Merge namespaces with the same name to avoid duplicate namespace blocks
+        let main_elements_merged = merge_namespaces(main_elements_owned);
+        let main_elements: Vec<&types::Element> = main_elements_merged.iter().collect();
 
         if !main_elements.is_empty() || elements_by_file.is_empty() {
             let mut generator = CodeGenerator::with_config(type_sizes.clone(), config.clone());
