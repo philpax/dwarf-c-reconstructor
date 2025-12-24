@@ -109,11 +109,14 @@ impl<'a> DwarfParser<'a> {
         for &id in &section_ids {
             let section_data = object
                 .section_by_name(id.name())
-                .and_then(|section| section.data().ok())
-                .unwrap_or(&[]);
+                .and_then(|section| section.uncompressed_data().ok())
+                .unwrap_or(Cow::Borrowed(&[]));
 
-            let relocated_data = apply_relocations(&object, section_data, id.name());
+            let relocated_data = apply_relocations(&object, &section_data, id.name());
             if let Cow::Owned(data) = relocated_data {
+                section_data_map.insert(id.name(), data.into_boxed_slice());
+            } else if let Cow::Owned(data) = section_data {
+                // Section was decompressed but not relocated - still need to store it
                 section_data_map.insert(id.name(), data.into_boxed_slice());
             }
         }
@@ -122,31 +125,21 @@ impl<'a> DwarfParser<'a> {
         // Box ensures the data address is stable even when moved
         let load_section =
             |id: gimli::SectionId| -> std::result::Result<DwarfReader<'a>, gimli::Error> {
-                let section_data = object
-                    .section_by_name(id.name())
-                    .and_then(|section| section.data().ok())
-                    .unwrap_or(&[]);
-
-                let relocated_data = apply_relocations(&object, section_data, id.name());
-
-                let data_ref: &'a [u8] = match relocated_data {
-                    Cow::Borrowed(data) => data,
-                    Cow::Owned(_) => {
-                        // Use the pre-stored relocated data from the map
-                        // SAFETY: We're extending the lifetime of the reference from the Box to 'a.
-                        // This is safe because:
-                        // 1. section_data_map contains the relocated data in Box (stable address)
-                        // 2. The Box data will be moved into the DwarfParser struct
-                        // 3. The DwarfParser has lifetime 'a
-                        // 4. The references won't outlive the parser
-                        if let Some(boxed_data) = section_data_map.get(id.name()) {
-                            unsafe {
-                                std::slice::from_raw_parts(boxed_data.as_ptr(), boxed_data.len())
-                            }
-                        } else {
-                            &[]
-                        }
-                    }
+                // First check if we have pre-stored data (decompressed and/or relocated)
+                let data_ref: &'a [u8] = if let Some(boxed_data) = section_data_map.get(id.name()) {
+                    // SAFETY: We're extending the lifetime of the reference from the Box to 'a.
+                    // This is safe because:
+                    // 1. section_data_map contains the data in Box (stable address)
+                    // 2. The Box data will be moved into the DwarfParser struct
+                    // 3. The DwarfParser has lifetime 'a
+                    // 4. The references won't outlive the parser
+                    unsafe { std::slice::from_raw_parts(boxed_data.as_ptr(), boxed_data.len()) }
+                } else {
+                    // No pre-stored data, use raw section data (for non-compressed, non-relocated sections)
+                    object
+                        .section_by_name(id.name())
+                        .and_then(|section| section.data().ok())
+                        .unwrap_or(&[])
                 };
 
                 Ok(gimli::EndianSlice::new(data_ref, gimli::LittleEndian))
