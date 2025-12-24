@@ -458,7 +458,20 @@ impl CodeGenerator {
             self.indent_level += 1;
         }
 
-        for (i, child) in ns.children.iter().enumerate() {
+        // Sort namespace children by line number (maintain DWARF order for same line)
+        let mut sorted_children: Vec<(usize, &Element)> = ns.children.iter().enumerate().collect();
+        sorted_children.sort_by_key(|(idx, elem)| {
+            let line = match elem {
+                Element::Compound(c) => c.typedef_line.or(c.line),
+                Element::Function(f) => f.line,
+                Element::Variable(v) => v.line,
+                Element::Namespace(ns) => ns.line,
+                Element::TypedefAlias(t) => t.line,
+            };
+            (line, *idx)
+        });
+
+        for (i, (_, child)) in sorted_children.iter().enumerate() {
             if i > 0 {
                 self.output.push('\n');
             }
