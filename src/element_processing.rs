@@ -3,7 +3,7 @@
 //! Provides functions for grouping, merging, and deduplicating elements
 //! based on their declaration files.
 
-use crate::types::{Element, Namespace};
+use crate::types::{Element, Function, Namespace};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -199,6 +199,86 @@ pub fn group_elements_by_file(elements: &[Element]) -> HashMap<Option<u64>, Vec<
     }
 
     elements_by_file
+}
+
+/// Wrap method definitions with namespace paths into proper Element::Namespace structures.
+/// This allows merge_namespaces() to properly merge methods from the same namespace.
+pub fn wrap_method_definitions_in_namespaces(elements: Vec<Element>) -> Vec<Element> {
+    wrap_method_definitions_with_context(elements, &[])
+}
+
+/// Recursively wrap method definitions, tracking the current namespace context.
+/// Functions inside a namespace element should have their namespace_path prefix stripped
+/// to avoid creating redundant nested namespaces.
+fn wrap_method_definitions_with_context(
+    elements: Vec<Element>,
+    current_namespace: &[String],
+) -> Vec<Element> {
+    let mut result = Vec::new();
+
+    for element in elements {
+        match element {
+            Element::Function(mut func) if func.is_method && !func.namespace_path.is_empty() => {
+                // Check if the function's namespace_path starts with the current namespace context
+                let remaining_path = if func.namespace_path.starts_with(current_namespace) {
+                    func.namespace_path[current_namespace.len()..].to_vec()
+                } else {
+                    // Namespace path doesn't match context - keep as is (shouldn't happen normally)
+                    func.namespace_path.clone()
+                };
+
+                if remaining_path.is_empty() {
+                    // Function is already in the correct namespace, just clear its namespace_path
+                    func.namespace_path.clear();
+                    result.push(Element::Function(func));
+                } else {
+                    // Wrap in the remaining namespace levels
+                    func.namespace_path.clear();
+                    let wrapped = wrap_function_in_namespace_path(func, remaining_path);
+                    result.push(wrapped);
+                }
+            }
+            Element::Namespace(mut ns) => {
+                // Build the new context by appending this namespace's name
+                let mut new_context = current_namespace.to_vec();
+                new_context.push(ns.name.clone());
+
+                // Recursively process children with the updated context
+                ns.children = wrap_method_definitions_with_context(ns.children, &new_context);
+                result.push(Element::Namespace(ns));
+            }
+            _ => {
+                // Keep other elements as-is
+                result.push(element);
+            }
+        }
+    }
+
+    result
+}
+
+/// Wrap a function in nested Namespace elements based on a namespace path.
+fn wrap_function_in_namespace_path(func: Function, namespace_path: Vec<String>) -> Element {
+    if namespace_path.is_empty() {
+        return Element::Function(func);
+    }
+
+    // Build nested namespaces from innermost to outermost
+    let mut current = Element::Function(func);
+    let line = match &current {
+        Element::Function(f) => f.line,
+        _ => None,
+    };
+
+    for ns_name in namespace_path.into_iter().rev() {
+        current = Element::Namespace(Namespace {
+            name: ns_name,
+            line,
+            children: vec![current],
+        });
+    }
+
+    current
 }
 
 /// Normalize a file path by removing .. and . components
