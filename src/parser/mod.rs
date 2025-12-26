@@ -641,11 +641,12 @@ impl<'a> DwarfParser<'a> {
     ) -> CompoundMetadata {
         let (is_typedef, typedef_name, typedef_line) =
             if let Some(typedef_info) = self.typedef_map.get(&abs_offset) {
-                // Only merge if BOTH have known file and they match
-                // This prevents forward declaration typedefs from appearing in every file
+                // Merge if BOTH have known file and they match, or if either is unknown
+                // (unknown file typically means same file in practice)
+                // This logic MUST match parse_typedef_alias's same_file check
                 let same_file = match (decl_file, typedef_info.decl_file) {
                     (Some(a), Some(b)) => a == b,
-                    _ => false, // If either is unknown, don't merge to avoid duplication
+                    _ => true, // If either is unknown, assume same file and merge
                 };
                 if same_file {
                     (true, Some(typedef_info.name.clone()), typedef_info.line)
@@ -1467,6 +1468,7 @@ impl<'a> DwarfParser<'a> {
                                 attrs.get_u64_attr(current_entry, gimli::DW_AT_decl_file);
 
                             // Check if typedef and target are in the same file (merge will happen)
+                            // This logic MUST match build_compound_metadata_with_typedef
                             let same_file = match (decl_file, target_decl_file) {
                                 (Some(a), Some(b)) => a == b,
                                 _ => true, // If either is unknown, assume same file (merge will happen)

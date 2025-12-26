@@ -229,8 +229,9 @@ impl<'a> TypeResolver<'a> {
 
                     // Check if it has a typedef (only if substitution is enabled)
                     if use_typedef_substitution {
-                        let offset = entry.offset().0;
-                        if let Some(typedef_info) = self.typedef_map.get(&offset) {
+                        let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
+                        let absolute_offset = unit_start + entry.offset().0;
+                        if let Some(typedef_info) = self.typedef_map.get(&absolute_offset) {
                             return Ok(TypeInfo::new(typedef_info.name.clone()));
                         }
                     }
@@ -238,8 +239,9 @@ impl<'a> TypeResolver<'a> {
                 } else {
                     // Anonymous type, check for typedef (only if substitution is enabled)
                     if use_typedef_substitution {
-                        let offset = entry.offset().0;
-                        if let Some(typedef_info) = self.typedef_map.get(&offset) {
+                        let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
+                        let absolute_offset = unit_start + entry.offset().0;
+                        if let Some(typedef_info) = self.typedef_map.get(&absolute_offset) {
                             return Ok(TypeInfo::new(typedef_info.name.clone()));
                         }
                     }
