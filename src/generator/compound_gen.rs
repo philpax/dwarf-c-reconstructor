@@ -232,6 +232,8 @@ impl<'a> CompoundGenerator<'a> {
 
             if let Some(line_num) = compound.line {
                 line.push_str(&format!(" //{}", line_num));
+            } else if !self.config.disable_no_line_comment {
+                line.push_str(" //No line number");
             }
 
             self.output.write_line(&line);
@@ -258,6 +260,8 @@ impl<'a> CompoundGenerator<'a> {
 
         if let Some(line) = compound.line {
             opening.push_str(&format!(" //{}", line));
+        } else if !self.config.disable_no_line_comment {
+            opening.push_str(" //No line number");
         }
 
         self.output.write_line(&opening);
