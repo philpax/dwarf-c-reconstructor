@@ -217,16 +217,10 @@ impl<'a> DwarfParser<'a> {
         let mut entries = unit.entries();
 
         // Get unit base offset for converting to absolute offsets
-        let unit_base = unit
-            .header
-            .offset()
-            .as_debug_info_offset()
-            .map(|o| o.0)
-            .unwrap_or(0);
+        let unit_base = unit_base_offset(unit);
 
         while let Some((_, entry)) = entries.next_dfs()? {
-            let offset = entry.offset().0;
-            let abs_offset = unit_base + offset;
+            let abs_offset = unit_base + entry.offset().0;
 
             // Collect typedefs
             if entry.tag() == gimli::DW_TAG_typedef {
@@ -574,14 +568,7 @@ impl<'a> DwarfParser<'a> {
         let decl_file = attrs.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Convert to absolute offset for typedef lookup
-        let offset_val = entry.offset().0;
-        let unit_base = unit
-            .header
-            .offset()
-            .as_debug_info_offset()
-            .map(|o| o.0)
-            .unwrap_or(0);
-        let abs_offset = unit_base + offset_val;
+        let abs_offset = unit_base_offset(unit) + entry.offset().0;
 
         // Only merge typedef if it's in the same file as the struct
         let metadata = self.build_compound_metadata_with_typedef(
@@ -611,14 +598,7 @@ impl<'a> DwarfParser<'a> {
         let decl_file = attrs.get_u64_attr(entry, gimli::DW_AT_decl_file);
 
         // Convert to absolute offset for typedef lookup
-        let offset_val = entry.offset().0;
-        let unit_base = unit
-            .header
-            .offset()
-            .as_debug_info_offset()
-            .map(|o| o.0)
-            .unwrap_or(0);
-        let abs_offset = unit_base + offset_val;
+        let abs_offset = unit_base_offset(unit) + entry.offset().0;
 
         // Only merge typedef if it's in the same file as the enum
         let metadata = self.build_compound_metadata_with_typedef(
@@ -641,13 +621,10 @@ impl<'a> DwarfParser<'a> {
     ) -> CompoundMetadata {
         let (is_typedef, typedef_name, typedef_line) =
             if let Some(typedef_info) = self.typedef_map.get(&abs_offset) {
-                // Only merge if BOTH have known file and they match
-                // This prevents forward declaration typedefs from appearing in every file
-                let same_file = match (decl_file, typedef_info.decl_file) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => false, // If either is unknown, don't merge to avoid duplication
-                };
-                if same_file {
+                // Merge if BOTH have known file and they match, or if either is unknown
+                // (unknown file typically means same file in practice)
+                // This logic MUST match parse_typedef_alias's same_file check
+                if is_same_decl_file(decl_file, typedef_info.decl_file) {
                     (true, Some(typedef_info.name.clone()), typedef_info.line)
                 } else {
                     (false, None, None)
@@ -949,12 +926,7 @@ impl<'a> DwarfParser<'a> {
         let (_, entry) = entries.next_dfs()?.unwrap();
 
         // Get the unit base for absolute offset calculation
-        let unit_base = unit
-            .header
-            .offset()
-            .as_debug_info_offset()
-            .map(|o| o.0)
-            .unwrap_or(0);
+        let unit_base = unit_base_offset(unit);
 
         // First, extract all attributes that don't require resolve_type
         // to avoid borrow conflicts
@@ -1348,13 +1320,7 @@ impl<'a> DwarfParser<'a> {
             attrs.get_ref_attr(unit, entry, gimli::DW_AT_abstract_origin)
         {
             // Convert to absolute offset
-            let unit_base = unit
-                .header
-                .offset()
-                .as_debug_info_offset()
-                .map(|o| o.0)
-                .unwrap_or(0);
-            let abs_origin_offset = unit_base + origin_offset;
+            let abs_origin_offset = unit_base_offset(unit) + origin_offset;
             self.abstract_origins.get(&abs_origin_offset).cloned()
         } else {
             None
@@ -1467,12 +1433,7 @@ impl<'a> DwarfParser<'a> {
                                 attrs.get_u64_attr(current_entry, gimli::DW_AT_decl_file);
 
                             // Check if typedef and target are in the same file (merge will happen)
-                            let same_file = match (decl_file, target_decl_file) {
-                                (Some(a), Some(b)) => a == b,
-                                _ => true, // If either is unknown, assume same file (merge will happen)
-                            };
-
-                            if same_file {
+                            if is_same_decl_file(decl_file, target_decl_file) {
                                 // Same file - these are handled by the typedef_map merging, skip them
                                 return Ok(None);
                             }

@@ -131,12 +131,7 @@ impl<'a> AttributeExtractor<'a> {
                 AttributeValue::DebugInfoRef(offset) => {
                     // This is an absolute reference (DW_FORM_ref_addr)
                     // Convert to unit-relative offset if within this unit
-                    let unit_base = unit
-                        .header
-                        .offset()
-                        .as_debug_info_offset()
-                        .map(|o| o.0)
-                        .unwrap_or(0);
+                    let unit_base = unit_base_offset(unit);
                     if offset.0 >= unit_base {
                         return Some(offset.0 - unit_base);
                     }
