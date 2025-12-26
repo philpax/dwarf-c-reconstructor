@@ -3,6 +3,26 @@
 pub type DwarfReader<'a> = gimli::EndianSlice<'a, gimli::LittleEndian>;
 pub type DwarfUnit<'a> = gimli::Unit<DwarfReader<'a>>;
 
+/// Get the base offset for a compilation unit.
+/// Used to convert relative offsets to absolute offsets for consistent lookups.
+pub fn unit_base_offset(unit: &DwarfUnit) -> usize {
+    unit.header
+        .offset()
+        .as_debug_info_offset()
+        .map(|o| o.0)
+        .unwrap_or(0)
+}
+
+/// Check if two decl_file values indicate the same source file.
+/// Returns true if both are known and equal, or if either is unknown
+/// (unknown typically means same file in practice).
+pub fn is_same_decl_file(a: Option<u64>, b: Option<u64>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x == y,
+        _ => true, // If either is unknown, assume same file
+    }
+}
+
 /// Information about a typedef collected during metadata pass.
 /// Maps a type offset to its typedef name and source location.
 #[derive(Debug, Clone)]

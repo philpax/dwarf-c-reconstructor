@@ -46,8 +46,7 @@ impl<'a> TypeResolver<'a> {
         offset: usize,
     ) -> Result<TypeInfo> {
         // Convert unit-relative offset to absolute offset for caching
-        let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
-        let absolute_offset = unit_start + offset;
+        let absolute_offset = unit_base_offset(unit) + offset;
 
         // Check cache using absolute offset
         if let Some(cached) = self.type_cache.get(&absolute_offset) {
@@ -229,8 +228,7 @@ impl<'a> TypeResolver<'a> {
 
                     // Check if it has a typedef (only if substitution is enabled)
                     if use_typedef_substitution {
-                        let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
-                        let absolute_offset = unit_start + entry.offset().0;
+                        let absolute_offset = unit_base_offset(unit) + entry.offset().0;
                         if let Some(typedef_info) = self.typedef_map.get(&absolute_offset) {
                             return Ok(TypeInfo::new(typedef_info.name.clone()));
                         }
@@ -239,8 +237,7 @@ impl<'a> TypeResolver<'a> {
                 } else {
                     // Anonymous type, check for typedef (only if substitution is enabled)
                     if use_typedef_substitution {
-                        let unit_start = unit.header.offset().as_debug_info_offset().unwrap().0;
-                        let absolute_offset = unit_start + entry.offset().0;
+                        let absolute_offset = unit_base_offset(unit) + entry.offset().0;
                         if let Some(typedef_info) = self.typedef_map.get(&absolute_offset) {
                             return Ok(TypeInfo::new(typedef_info.name.clone()));
                         }
