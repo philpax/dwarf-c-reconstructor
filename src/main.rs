@@ -5,7 +5,9 @@ mod parser;
 mod types;
 
 use clap::Parser as ClapParser;
-use element_processing::{group_elements_by_file, merge_namespaces, normalize_path};
+use element_processing::{
+    group_elements_by_file, merge_namespaces, normalize_path, wrap_method_definitions_in_namespaces,
+};
 use error::Result;
 use generator::{CodeGenConfig, CodeGenerator};
 use object::read::archive::ArchiveFile;
@@ -215,8 +217,9 @@ fn main() -> Result<()> {
         // Generate header comment (use original path for display)
         generator.generate_header_comment_simple(original_path);
 
-        // Merge namespaces with the same name and generate elements
-        let merged_elements = merge_namespaces(elements.clone());
+        // Wrap method definitions in namespace elements and merge namespaces with the same name
+        let wrapped_elements = wrap_method_definitions_in_namespaces(elements.clone());
+        let merged_elements = merge_namespaces(wrapped_elements);
         let element_refs: Vec<&types::Element> = merged_elements.iter().collect();
         generator.generate_elements(&element_refs);
 
@@ -278,8 +281,9 @@ fn main() -> Result<()> {
             }
         }
 
-        // Merge namespaces with the same name to avoid duplicate namespace blocks
-        let main_elements_merged = merge_namespaces(main_elements_owned);
+        // Wrap method definitions in namespace elements and merge namespaces with the same name
+        let main_elements_wrapped = wrap_method_definitions_in_namespaces(main_elements_owned);
+        let main_elements_merged = merge_namespaces(main_elements_wrapped);
         let main_elements: Vec<&types::Element> = main_elements_merged.iter().collect();
 
         if !main_elements.is_empty() || elements_by_file.is_empty() {
