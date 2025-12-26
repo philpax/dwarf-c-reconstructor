@@ -6,7 +6,8 @@ mod types;
 
 use clap::Parser as ClapParser;
 use element_processing::{
-    group_elements_by_file, merge_namespaces, normalize_path, wrap_method_definitions_in_namespaces,
+    group_elements_by_file, merge_namespaces_with_config, normalize_path,
+    wrap_method_definitions_in_namespaces, MergeConfig, MergeStats,
 };
 use error::Result;
 use generator::{CodeGenConfig, CodeGenerator};
@@ -131,6 +132,14 @@ struct Args {
     /// Skip indentation inside namespaces (content starts at column 0)
     #[arg(long)]
     skip_namespace_indentation: bool,
+
+    /// Enable verbose output (show details of merged anonymous types)
+    #[arg(long)]
+    verbose: bool,
+
+    /// Disable merging of duplicate anonymous types (enums, structs, unions)
+    #[arg(long)]
+    no_anonymous_merge: bool,
 }
 
 fn main() -> Result<()> {
@@ -177,6 +186,15 @@ fn main() -> Result<()> {
         skip_namespace_indentation: args.skip_namespace_indentation,
     };
 
+    // Create merge config for anonymous type merging
+    let merge_config = MergeConfig {
+        verbose: args.verbose,
+        no_anonymous_merge: args.no_anonymous_merge,
+    };
+
+    // Track total merge stats across all files
+    let mut total_merge_stats = MergeStats::default();
+
     // First pass: collect all header file elements from all compile units
     // Map from normalized path to (elements, original_path)
     let mut header_elements: HashMap<String, (Vec<types::Element>, String)> = HashMap::new();
@@ -219,7 +237,14 @@ fn main() -> Result<()> {
 
         // Wrap method definitions in namespace elements and merge namespaces with the same name
         let wrapped_elements = wrap_method_definitions_in_namespaces(elements.clone());
-        let merged_elements = merge_namespaces(wrapped_elements);
+        let (merged_elements, merge_stats) =
+            merge_namespaces_with_config(wrapped_elements, &merge_config);
+        total_merge_stats.anonymous_enums_merged += merge_stats.anonymous_enums_merged;
+        total_merge_stats.anonymous_structs_merged += merge_stats.anonymous_structs_merged;
+        total_merge_stats.anonymous_unions_merged += merge_stats.anonymous_unions_merged;
+        total_merge_stats
+            .merge_details
+            .extend(merge_stats.merge_details);
         let element_refs: Vec<&types::Element> = merged_elements.iter().collect();
         generator.generate_elements(&element_refs);
 
@@ -283,7 +308,14 @@ fn main() -> Result<()> {
 
         // Wrap method definitions in namespace elements and merge namespaces with the same name
         let main_elements_wrapped = wrap_method_definitions_in_namespaces(main_elements_owned);
-        let main_elements_merged = merge_namespaces(main_elements_wrapped);
+        let (main_elements_merged, merge_stats) =
+            merge_namespaces_with_config(main_elements_wrapped, &merge_config);
+        total_merge_stats.anonymous_enums_merged += merge_stats.anonymous_enums_merged;
+        total_merge_stats.anonymous_structs_merged += merge_stats.anonymous_structs_merged;
+        total_merge_stats.anonymous_unions_merged += merge_stats.anonymous_unions_merged;
+        total_merge_stats
+            .merge_details
+            .extend(merge_stats.merge_details);
         let main_elements: Vec<&types::Element> = main_elements_merged.iter().collect();
 
         if !main_elements.is_empty() || elements_by_file.is_empty() {
@@ -306,6 +338,14 @@ fn main() -> Result<()> {
 
             fs::write(&output_path, generator.get_output())?;
             println!("Generated: {}", output_path.display());
+        }
+    }
+
+    // Print merge statistics if any anonymous types were merged
+    if total_merge_stats.total_merged() > 0 {
+        total_merge_stats.print_summary();
+        if args.verbose {
+            total_merge_stats.print_verbose_details();
         }
     }
 
